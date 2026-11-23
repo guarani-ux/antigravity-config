@@ -832,6 +832,17 @@ def check_write_integrity(name, args, abs_path):
                         "ask",
                         f"RW-01 (Assertion Weakening): Proposed edit reduces test assertion count from {old_asserts} to {new_asserts}. Do not delete assertions to make tests pass.",
                     )
+                try:
+                    import test_quality_gate
+                    tq_findings = test_quality_gate.check_test_source(candidate_py, abs_path)
+                    if tq_findings:
+                        first = tq_findings[0]
+                        return (
+                            "deny",
+                            f"{first.rule_id} (Test Quality Gate, line {first.line}): {first.message}",
+                        )
+                except ImportError:
+                    pass
 
             # RW-11 & RW-17: Production Mock Injection & Test-Harness Detection
             if not in_brain and not is_test_file(abs_path):
