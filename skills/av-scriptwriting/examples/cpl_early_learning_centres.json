@@ -1,0 +1,58 @@
+{
+  "title": "CALGARY PUBLIC LIBRARY — EARLY LEARNING CENTRES (10 YEARS)",
+  "client": "Calgary Public Library",
+  "platform": "YouTube (Public Release)",
+  "audience": "Parents & caregivers of children ages 0–5 (Walk-in state: tired in winter, assuming libraries are either quiet book-rooms or that ELCs are just indoor playgrounds)",
+  "mode": "Mode B — Pre-Shoot Documentary / SME Hybrid (Kristen Duke VO + On-Camera + Caregiver Bench Snippets)",
+  "story_spine": "Leading Word: \"The Look Back.\" A two-year-old only tackles hard puzzles and builds early reading confidence on the floor when they feel safe—and they know they're safe because every time something clicks, they look back at the bench around the room where their parent finally has a place to exhale. Over ten years and 13 locations since Fish Creek opened in 2016, CPL didn't just build play areas; they built a living room around the whole family.",
+  "interview_guide": [
+    {
+      "subject": "Kristen Duke (Early Learning Specialist)",
+      "questions": [
+        "**The Surface vs. Reality Prompt:** \"When a parent walks in here out of the cold for the first time, what does it look like to them—and what are you actually watching happen on this floor?\"",
+        "**The Single-Moment Prompt (Anecdote):** \"Point to one piece in this room—a puzzle, a ramp, a nook. Walk me through what happens when a two-year-old gets stuck on it and figures it out.\"",
+        "**The Physical Bridge (The Look Back):** \"What is the very first thing a toddler does the second they figure something out—who do they look for, and why does that bench around the edge matter so much?\"",
+        "**The 10-Year Human Arc:** \"A kid who crawled into Fish Creek in 2016 is thirteen years old now. What changes when you grow up thinking of the library as your living room?\""
+      ]
+    },
+    {
+      "subject": "On-Site Parents & Caregivers (Candid Bench Grabs — Seated Eye-Level)",
+      "questions": [
+        "**The Winter Reality:** \"It's minus twenty-five in January and you're home alone with a toddler. What does walking through those doors feel like?\"",
+        "**The Shared Exhale:** \"What happens the moment you sit down on this bench next to another parent who's in the exact same boat?\""
+      ]
+    }
+  ],
+  "beats": [
+    {
+      "beat": "BEAT 1: Out of the Cold",
+      "value_shift": "Requires: Walk-in winter friction\nGrounds: Room geography (play floor + perimeter benches)\nShift: [Loud Playroom] -> [Deliberate Design]",
+      "audio": "**[NAT SOUND OPEN — 2.5s PICTURE LEAD]:** Heavy winter zipper coming down. Two small boots thud onto the floor. Warm room sound rushes in—kids laughing, wooden blocks tumbling.\n\n**KRISTEN DUKE (V.O.):**\nAt minus twenty on a Tuesday morning, this just looks like a warm room for kids to burn off steam.\n\n**KRISTEN DUKE (ON-CAMERA):**\nAnd honestly? If that's all you need today, we'll take it. But watch this floor for thirty seconds. Every piece in here is doing a job.",
+      "video": "**THRESHOLD TRACKING SHOT (28\" Toddler Eye-Level, 35mm):**\nA toddler kicks free of snow boots at the entrance cubbies and runs onto the padded floor of Fish Creek ELC. The wide frame establishes the full geography: bright play structures in the center, parents seated on the curved wooden bench wrapping the perimeter.\n\n**MEDIUM CLOSE-UP (MCU) — KRISTEN DUKE:**\nSeated at bench height inside the active room. Upstage window light.\n**LOWER THIRD:** Kristen Duke | Early Learning Specialist"
+    },
+    {
+      "beat": "BEAT 2: The Stubborn Gear",
+      "value_shift": "Requires: Every piece has a job\nGrounds: The child's look back to the bench\nShift: [Simple Toy] -> [Pre-Reading Grit]",
+      "audio": "**KRISTEN (V.O.):**\nLook at her hands here. She's two. She's not reading words on a page yet. Right now, she's just trying to figure out why this wooden gear won't turn.\n\n**[VOICE-OFF COMPLETER — 2.5s NAT SOUND]:** She twists left—stuck. Twists right—*CLACK*. The wooden teeth lock in. She gasps.\n\n**KRISTEN (V.O.):**\nThat's it right there. Holding a thought, testing a pattern, trying again when it's hard. That's how a brain gets ready to read.\n\n**[SOUNDBITE TARGET — KRISTEN]:**\n*Briefly points out how singing a rhyme or balancing across a low beam builds the rhythm of language in the body.*\n\n**KRISTEN (ON-CAMERA):**\nAnd watch what she does the exact second it clicks—",
+      "video": "**5-SHOT COVERAGE SEQUENCE (Locked Tripod & Macro, 60fps):**\n1. **Tight on Hands:** Small fingers gripping a red wooden gear on the wall board, struggling to align the teeth.\n2. **Tight on Eyes:** Furrowed brow. Pure concentration.\n3. **The Visual Punchline (During Voice-Off):** The gear drops into place and spins. Her eyes widen.\n4. **Wide Context:** Kids clapping rhythmically with parents in the reading corner.\n5. **The Physical Bridge (Over-the-Shoulder):** Right as Kristen says *\"watch what she does—\"*, the toddler spins around on her heels and looks straight toward the perimeter bench."
+    },
+    {
+      "beat": "BEAT 3: The Look Back",
+      "value_shift": "Requires: Child looking to the bench\nGrounds: Whole-family support system\nShift: [Adult Isolation (-)] -> [Shared Exhale (+)]",
+      "audio": "**[NAT SOUND POCKET — 1.5s]:** The parent on the bench laughs softly and waves back.\n\n**KRISTEN (V.O.):**\nThey always look back first. A kid only wanders off to try something new when the adult who brought them feels safe, too.\n\n**KRISTEN (ON-CAMERA):**\nBeing home alone with a baby all winter is lonely. That bench wraps around the room so you can set your coffee down, stay five steps away, and actually drop your shoulders.\n\n**CAREGIVER 1 (ON-CAMERA, BENCH):**\n**[SOUNDBITE TARGET]:** *\"In January, this room was my lifeline. It just got us out of the house.\"*\n\n**CAREGIVER 2 (ON-CAMERA, BENCH):**\n**[SOUNDBITE TARGET]:** *\"You sit down, the parent next to you says 'Rough night?' and you realize—okay, it's not just me.\"*",
+      "video": "**EYE-LINE MATCH CUT (85mm Candid Compression, Seated Axis):**\nCutting directly from the toddler's gaze to her dad on the perimeter bench. His shoulders drop; he smiles back over a travel mug.\n\n**OBSERVATIONAL TWO-SHOT (Seated Bench Height):**\nTwo parents sitting beside parked strollers. Their toddlers waddle up between them holding board books; the two adults laugh and start talking.\n\n**CANDID PORTRAITS — CAREGIVERS 1 & 2:**\nSeated bench height, natural window light, toddlers on their laps."
+    },
+    {
+      "beat": "BEAT 4: The Living Room (2016 to Today)",
+      "value_shift": "Requires: Whole-family bond in the room\nGrounds: Lifelong library belonging\nShift: [One Morning Outing] -> [10-Year City Legacy]",
+      "audio": "**KRISTEN (V.O.):**\nBack in 2016, we opened the very first one of these rooms here at Fish Creek. Now there are thirteen across the city.\n\n**KRISTEN (ON-CAMERA):**\nThe two-year-olds who crawled across that first floor ten years ago? They're thirteen now. Watch them walk in after middle school.\n\n**KRISTEN (V.O.):**\nNobody ever had to teach them not to be intimidated by a library. To them, this building was never a quiet place where you get shushed. It was their first living room.",
+      "video": "**MATCH-CUT MONTAGE ACROSS CENTRES:**\n- Fish Creek's iconic fire truck in 2016 matching directly into today's busy Fish Creek stage.\n- Rapid kinetic cuts: steering the helicopter cockpit at Seton, climbing Central's sky-lit tower, Signal Hill's outdoor nature play.\n\n**THE PHYSICAL BRIDGE (Deep Focus Corridor Shot):**\nJust outside the ELC glass wall, a 13-year-old with a backpack walks confidently into the main library stacks, drops into an armchair with headphones, while a toddler and parent walk past toward the checkout desk."
+    },
+    {
+      "beat": "BEAT 5: No Catch",
+      "value_shift": "Requires: The library feels like home\nGrounds: Immediate drop-in action\nShift: [Perceived Friction] -> [Open Door]",
+      "audio": "**[NAT SOUND POCKET — 2s]:** Beep of the self-checkout scanner; a toddler pats the top of a stack of picture books.\n\n**KRISTEN (V.O.):**\nThere's no registration. No fee. And nobody cares if your kid is loud.\n\n**KRISTEN (ON-CAMERA):**\nJust bundle them up, push open the door, and come hang out.",
+      "video": "**LOW-ANGLE FOLLOWING SHOT (28\" Axis):**\nA toddler proudly lugging a giant board book under one arm, holding their mom's hand as they walk out into the bright main library floor.\n\n**END CARD SLATE (CPL Brand Identity):**\n- **Headline:** 13 Early Learning Centres Across Calgary\n- **Subhead:** Free. Drop-In. Every Day.\n- **URL:** calgarylibrary.ca/early-learning"
+    }
+  ]
+}

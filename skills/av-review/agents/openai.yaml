@@ -1,0 +1,5 @@
+interface:
+  display_name: "AV Review"
+  short_description: "Two-axis parallel sub-agent review of an A/V script (Craft Smells vs. Brief & Custody)"
+policy:
+  allow_implicit_invocation: true
