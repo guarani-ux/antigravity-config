@@ -26,6 +26,7 @@ class TestOperatorRouter(unittest.TestCase):
             ("draft an av script for this video", "av-craft"),
             ("help write a cover letter for this role", "cl-craft"),
             ("run a forensic audit on this module", "mode-forensic"),
+            ("think about our options and how should we approach this", "mode-reframe"),
             ("what if we build a new system for notes", "idea-crucible"),
             ("please debug this failing test regression", "diagnosing-bugs"),
             ("polish the frontend dashboard css layout", "visual-reflex"),

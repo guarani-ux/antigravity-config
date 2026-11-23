@@ -77,6 +77,18 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "SIGNAL [visual-reflex]: Load visual-reflex (no #000/#fff clipping, 2-stage contact shadows, hairline partitions) and verify visually.",
     ),
     (
+        "mode_reframe",
+        re.compile(
+            r"\b(?:think about our options|what are our options|weigh(?:ing)? our options|"
+            r"how should we approach|how can we go about|repeatable,\s*deterministic way|"
+            r"before we commit to code|compare paradigms)\b",
+            re.IGNORECASE,
+        ),
+        "SIGNAL [mode-reframe]: Load mode-reframe (Top-of-Totem-Pole Modulator). Zero file edits. "
+        "Identify governing discipline(s) & altitude, flag missing information, compare 3 distinct "
+        "paradigms + pitfalls, and issue an Engage/Suppress/Gate Mobilization Directive.",
+    ),
+    (
         "acceleration",
         re.compile(
             r"\b(what if we|new system|new folder|new repo|new project|new idea|spark:|idea:|another idea|let'?s build a brand new)\b",
