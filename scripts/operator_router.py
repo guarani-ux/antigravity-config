@@ -187,7 +187,7 @@ def detect_prompt_signals(user_text: str) -> list[str]:
 
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
-    """Emit startup orientation carrying local WIP state (if present) and Operator posture."""
+    """Emit startup orientation carrying local WIP state (if present) and always-in mode-reframe modulator."""
     ledger = find_local_ledger(payload)
     if ledger:
         s = parse_ledger_summary(ledger)
@@ -201,7 +201,17 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             "plain-English OS custody). Central WSL ledger: "
             "/home/flowe/.gemini/antigravity/scratch/operator_hub/IDEAS.md"
         )
-    return {"injectSteps": [{"systemMessage": {"systemMessage": status}}]}
+    modulator = (
+        "MODE-REFRAME MODULATOR (Always-In): On any non-trivial problem, design, or process fork "
+        "(skip only for routine Tier 0 execution), modulate from the top of the totem pole before editing files: "
+        "(1) infer governing discipline(s) & altitude, (2) flag missing/uninspected info, "
+        "(3) compare 3 distinct paradigms + pitfalls, and (4) issue an Engage/Suppress/Gate Mobilization Directive."
+    )
+    return {
+        "injectSteps": [
+            {"systemMessage": {"systemMessage": f"{status}\n{modulator}"}}
+        ]
+    }
 
 
 def _already_emitted_for_prompt(payload: dict[str, Any], user_text: str) -> bool:

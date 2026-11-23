@@ -54,6 +54,16 @@ class TestOperatorRouter(unittest.TestCase):
         self.assertTrue(any("diagnosing-bugs" in s for s in signals))
         self.assertFalse(any("idea-crucible" in s for s in signals))
 
+    def test_session_start_always_injects_mode_reframe_modulator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "IDEAS.md"
+            ledger.write_text("## Stage 4: Active (WIP <= 1)\n- [P-TEST] slice\n", encoding="utf-8")
+            out = operator_router.handle_session_start({"workspacePaths": [tmp]})
+            msg = out["injectSteps"][0]["systemMessage"]["systemMessage"]
+            self.assertIn("Active(WIP<=1): 1", msg)
+            self.assertIn("MODE-REFRAME MODULATOR (Always-In):", msg)
+            self.assertIn("Engage/Suppress/Gate", msg)
+
     def test_pre_invocation_emits_once_per_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = {
