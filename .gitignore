@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.py[cod]
+plugins/
+projects/
+sidecars/
+.disabled_skills/
+backups/
+guard_audit.log
+config.json
+.migrated
+skills/impeccable/scripts/bin/
+skills/impeccable/scripts/data/

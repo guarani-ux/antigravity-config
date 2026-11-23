@@ -1,0 +1,58 @@
+{
+  "reliability_v4": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file|read_file|run_command|call_mcp_tool|mcp_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ./scripts/hook_v4.py pre",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ./scripts/hook_v4.py post",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ./scripts/hook_v4.py stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "operator-crucible": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python ./scripts/operator_router.py session-start",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python ./scripts/operator_router.py pre-invocation",
+        "timeout": 5
+      }
+    ]
+  }
+}
