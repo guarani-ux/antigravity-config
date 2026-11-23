@@ -69,6 +69,77 @@ class TestOperatorRouter(unittest.TestCase):
             encoded = json.dumps(first)
             self.assertIn("diagnosing-bugs", encoded)
 
+    def test_diagnosing_bugs_rejects_false_positives_and_spec_docs(self) -> None:
+        false_positives = [
+            "You keep throwing off one version of the setup",
+            "WORKFLOW 1 — PRE-BUILD PLAN HARDENING\nEnsure no regression test fails and diagnose scope.",
+            ("x" * 1600) + " debug this later",
+        ]
+        for prompt in false_positives:
+            signals = operator_router.detect_prompt_signals(prompt)
+            self.assertFalse(
+                any("diagnosing-bugs" in s for s in signals),
+                f"Unexpected diagnosing-bugs hit on: {prompt[:80]}",
+            )
+
+        true_positives = [
+            ("x" * 1600) + " Traceback (most recent call last): ValueError",
+            "service is throwing a ValueError on startup",
+            "investigate this regression in parser.py",
+        ]
+        for prompt in true_positives:
+            signals = operator_router.detect_prompt_signals(prompt)
+            self.assertTrue(
+                any("diagnosing-bugs" in s for s in signals),
+                f"Expected diagnosing-bugs hit on: {prompt[:80]}",
+            )
+
+    def test_eval_router_replays_synthetic_transcripts_and_flags_noisy_rules(self) -> None:
+        import eval_router  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            s1 = root / "s1" / ".system_generated" / "logs"
+            s2 = root / "s2" / ".system_generated" / "logs"
+            s1.mkdir(parents=True)
+            s2.mkdir(parents=True)
+
+            (s1 / "transcript.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "refactor store.py"}),
+                        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>debug traceback</USER_REQUEST>"}),
+                        json.dumps({"type": "USER_INPUT", "source": "SYSTEM", "content": "debug ignored system row"}),
+                        "{corrupted json line",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (s2 / "transcript.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "check git status"}),
+                        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "summarize notes"}),
+                        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "service is throwing an exception"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            report = eval_router.evaluate_router(root, noisy_threshold=0.25)
+            self.assertEqual(report["total_prompts"], 5)
+            self.assertEqual(report["fired_prompts"], 2)
+            self.assertEqual(report["abstained_prompts"], 3)
+            self.assertEqual(report["skipped_lines"], 1)
+            self.assertEqual(report["per_rule_hits"]["diagnosing_bugs"], 2)
+            self.assertIn("diagnosing_bugs", report["noisy_rules"])
+
+            missing = eval_router.evaluate_router(root / "does_not_exist")
+            self.assertEqual(missing["total_prompts"], 0)
+            self.assertEqual(missing["fire_rate"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

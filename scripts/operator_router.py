@@ -61,7 +61,9 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "diagnosing_bugs",
         re.compile(
-            r"\b(debug|diagnose|failing test|regression|flaky|stack trace|traceback|throwing)\b",
+            r"\b(?:debug(?:ging)?|diagnos(?:e|ing)|failing tests?|flaky|stack trace|traceback|"
+            r"throwing\s+(?:an?\s+)?(?:error|exception|typeerror|valueerror|keyerror|runtimeerror|traceback)|"
+            r"(?:fix|investigate|caused|introduced|hit|track\s+down|debug)\s+(?:a\s+|this\s+|the\s+)?regression)\b",
             re.IGNORECASE,
         ),
         "SIGNAL [diagnosing-bugs]: Reproduce with a red-capable command and state 3 falsifiable hypotheses BEFORE editing code.",
@@ -85,6 +87,11 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "and run the 3 Hardening Checks BEFORE creating code or directories.",
     ),
 )
+
+SPEC_DOC_RE = re.compile(
+    r"(?im)^\s*(?:WORKFLOW\s+\d+|#\s*PHASE\s+\d+|##\s*Final Execution Prompt|TARGET REPOSITORY:)"
+)
+TRACE_RE = re.compile(r"\b(?:traceback|stack trace)\b", re.IGNORECASE)
 
 SECTION_MAP = (
     ("stage 4:", "active"),
@@ -154,8 +161,13 @@ def detect_prompt_signals(user_text: str) -> list[str]:
         or "active slice" in lower_text
         or "hardened spec" in lower_text
     )
+    skip_diagnosing = (
+        len(user_text) > 1500 or bool(SPEC_DOC_RE.search(user_text))
+    ) and not bool(TRACE_RE.search(user_text))
     for signal_id, pattern, instruction in SIGNAL_RULES:
         if signal_id == "acceleration" and skip_acceleration:
+            continue
+        if signal_id == "diagnosing_bugs" and skip_diagnosing:
             continue
         if pattern.search(user_text):
             messages.append(instruction)
