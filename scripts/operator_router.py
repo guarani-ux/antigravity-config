@@ -23,6 +23,16 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "Use writers-room / story-lane MCP spokes (K-MCP-01) and run cold-receiver-review (G05) + ig-evidence-review before handoff.",
     ),
     (
+        "meeting_sim",
+        re.compile(
+            r"\b(stakeholder|handoff|approval|sign-?off|release package|should we ship|trade-?off|decision)\b",
+            re.IGNORECASE,
+        ),
+        "SIGNAL [meeting-simulator]: Before responding on this consequential decision, run a sequential role-order pass "
+        "(each role receives prior proposal, open objections, and blockers -> revise|retain|hold) and report what changed, "
+        "which constraint mattered, and what stayed open.",
+    ),
+    (
         "crucible_code",
         re.compile(
             r"\b(crucible_gate|campaign\.json|tx_patch|doctor\.py|router\.py|hook_v4|operator_router)\b",
@@ -187,19 +197,10 @@ def detect_prompt_signals(user_text: str) -> list[str]:
 
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
-    """Emit startup orientation carrying local WIP state (if present)."""
-    ledger = find_local_ledger(payload)
-    if ledger:
-        s = parse_ledger_summary(ledger)
-        status = (
-            f"Local IDEAS.md ({ledger.name}) — Active(WIP<=1): {s['active']} | "
-            f"Hardened: {s['hardened']} | Challenged: {s['challenged']} | Raw Sparks: {s['raw']}."
-        )
-    else:
-        status = "Global constitution active (Orient -> Freeze -> Execute -> Verify; Tier 0/1/2)."
+    """Emit minimal startup orientation without enforcing a rigid IDEAS.md ledger."""
     return {
         "injectSteps": [
-            {"systemMessage": {"systemMessage": status}}
+            {"systemMessage": {"systemMessage": "Global constitution active (Orient -> Freeze -> Execute -> Verify; Tier 0/1/2)."}}
         ]
     }
 

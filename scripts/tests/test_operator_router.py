@@ -60,8 +60,7 @@ class TestOperatorRouter(unittest.TestCase):
             ledger.write_text("## Stage 4: Active (WIP <= 1)\n- [P-TEST] slice\n", encoding="utf-8")
             out = operator_router.handle_session_start({"workspacePaths": [tmp]})
             msg = out["injectSteps"][0]["systemMessage"]["systemMessage"]
-            self.assertIn("Active(WIP<=1): 1", msg)
-            self.assertNotIn("MODE-REFRAME MODULATOR", msg)
+            self.assertIn("Global constitution active", msg)
 
     def test_pre_invocation_emits_once_per_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

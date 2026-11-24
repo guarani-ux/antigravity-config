@@ -1,0 +1,246 @@
+"""Mechanical GEMINI.md lifecycle controller (PreToolUse, PostToolUse, Stop)."""
+
+from __future__ import annotations
+
+import ast
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from .ast_gate import check_write_integrity
+from .policy import (
+    check_mcp_call,
+    check_shell_command,
+    domain_bucket,
+    effective_roots,
+    is_code_file,
+    is_meaningful_verification_command,
+    is_protected_path,
+    is_subagent,
+    resolve_target,
+)
+from .state import STATE_FILENAME, load_state, save_state, state_path
+
+
+def _extract_path_arg(args: dict[str, Any]) -> Any:
+    for k in ("Path", "TargetFile", "file_path", "path", "AbsolutePath"):
+        if args.get(k) is not None:
+            return args.get(k)
+    return None
+
+
+def pre(payload: dict[str, Any]) -> dict[str, str]:
+    tool = payload.get("toolCall") or {}
+    name = str(tool.get("name") or "")
+    args = tool.get("args")
+    subagent = is_subagent(payload)
+    if not isinstance(args, dict):
+        return {"decision": "deny" if subagent else "ask", "reason": "Cannot inspect tool arguments."}
+
+    if name == "read_file":
+        return {"decision": "allow", "reason": "Read operation permitted."}
+
+    roots = payload.get("workspacePaths") or []
+
+    if name in ("write_file", "edit_file"):
+        raw_target = _extract_path_arg(args)
+        if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in (
+            STATE_FILENAME,
+            "reliability-events.jsonl",
+        ):
+            return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}
+
+        resolved = resolve_target(raw_target, roots)
+        if resolved is None:
+            if subagent:
+                return {"decision": "deny", "reason": "Subagent cannot write outside mounted workspace."}
+            return {"decision": "ask", "reason": "File target outside mounted workspace; native permissions apply."}
+
+        rel, full, matched_root = resolved
+        if is_protected_path(rel, full):
+            return {
+                "decision": "deny",
+                "reason": "RW-04: Protected governance, acceptance, hook state, or Git internals; direct modification prohibited.",
+            }
+
+        if state_path(payload) is not None and matched_root is not None:
+            st = load_state(payload)
+            if st.repair_strikes >= 3:
+                return {
+                    "decision": "deny",
+                    "reason": "LIFECYCLE (3-Strike Governor): 3 failed verification cycles after edits. Inspect root cause with read_file before patching again.",
+                }
+            if (
+                not subagent
+                and (Path(matched_root) / ".git").exists()
+                and not st.oriented
+                and (is_code_file(full) or os.path.isfile(full))
+            ):
+                return {
+                    "decision": "deny",
+                    "reason": "LIFECYCLE (Orient-Before-Edit): Read an entry/target file or run an orientation check before mutating workspace files.",
+                }
+
+        issue = check_write_integrity(name, args, full)
+        if issue is not None:
+            dec, rsn = issue
+            if subagent and dec in ("ask", "force_ask"):
+                dec = "deny"
+            return {"decision": dec, "reason": rsn}
+        return {"decision": "allow", "reason": "Workspace edit verified."}
+
+    if name in ("run_command", "command"):
+        cmd = args.get("CommandLine") or args.get("command") or args.get("cmd")
+        if not isinstance(cmd, str) or not cmd.strip():
+            return {"decision": "deny" if subagent else "ask", "reason": "Cannot verify command text."}
+        return check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent)
+
+    if name == "call_mcp_tool" or name.startswith("mcp_"):
+        return check_mcp_call(name, args, subagent)
+
+    return {"decision": "allow", "reason": "Unclassified tool permitted."}
+
+
+def post(payload: dict[str, Any]) -> dict[str, Any]:
+    if state_path(payload) is None:
+        return {}
+    st = load_state(payload)
+    failed = bool(payload.get("error"))
+    st.consecutive_tool_errors = (st.consecutive_tool_errors + 1) if failed else 0
+
+    tool = payload.get("toolCall") or {}
+    name = str(tool.get("name") or "")
+    args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+
+    if name == "read_file" and not failed:
+        st.oriented = True
+        if st.repair_strikes >= 3:
+            st.repair_strikes = 2
+    elif name in ("write_file", "edit_file") and not failed:
+        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [])
+        if res is not None:
+            rel, full, matched_root = res
+            if matched_root is not None:
+                if is_code_file(full):
+                    if full not in st.edited_code_files:
+                        st.edited_code_files.append(full)
+                    st.unverified_code_edits = True
+                dom = domain_bucket(rel)
+                if dom and dom not in st.edited_domain_dirs:
+                    st.edited_domain_dirs.append(dom)
+    elif name in ("run_command", "command"):
+        st.oriented = True
+        cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
+        if is_meaningful_verification_command(cmd):
+            if failed:
+                if st.edited_code_files or st.unverified_code_edits:
+                    st.repair_strikes += 1
+            else:
+                st.repair_strikes = 0
+                st.unverified_code_edits = False
+                if "crucible_gate.py" in cmd.lower() or "verify_all.ps1" in cmd.lower():
+                    st.edited_domain_dirs = []
+
+    save_state(payload, st)
+    return {}
+
+
+def _check_acceptance_and_edited_py(roots: list[str], edited_code_files: list[str]) -> list[str]:
+    problems: list[str] = []
+    for py_path in edited_code_files:
+        if py_path.lower().endswith(".py") and os.path.isfile(py_path):
+            try:
+                ast.parse(Path(py_path).read_text(encoding="utf-8"), filename=py_path)
+            except (SyntaxError, OSError, UnicodeError, ValueError) as exc:
+                problems.append(f"Edited Python file failed AST parse: {os.path.basename(py_path)} ({type(exc).__name__})")
+
+    if len(roots) != 1:
+        return problems
+    root = Path(roots[0])
+    manifest = root / ".agents" / "acceptance.lock.json"
+    if not manifest.is_file():
+        return problems
+    try:
+        contract = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(contract, dict):
+            return ["Acceptance contract must be a JSON object."] + problems
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ["Acceptance contract cannot be parsed."] + problems
+
+    req_files = contract.get("required_files", [])
+    if not isinstance(req_files, list):
+        return ["Acceptance required_files is not a list."] + problems
+    for rel in req_files[:100]:
+        res = resolve_target(rel, [str(root)])
+        if res is None or res[2] is None:
+            problems.append(f"Acceptance path escapes workspace: {rel}")
+            continue
+        if not os.path.isfile(res[1]) or os.path.getsize(res[1]) == 0:
+            problems.append(f"Missing or empty required file: {rel}")
+
+    py_files = contract.get("python_syntax", [])
+    if isinstance(py_files, list):
+        for rel in py_files[:100]:
+            res = resolve_target(rel, [str(root)])
+            if res is None or res[2] is None:
+                problems.append(f"Python syntax path escapes workspace: {rel}")
+                continue
+            try:
+                ast.parse(Path(res[1]).read_text(encoding="utf-8"), filename=res[1])
+            except (SyntaxError, OSError, UnicodeError, ValueError) as exc:
+                problems.append(f"Python file did not parse: {rel} ({type(exc).__name__})")
+    return problems
+
+
+def stop(payload: dict[str, Any]) -> dict[str, str]:
+    if payload.get("terminationReason") not in ("NO_TOOL_CALL", "model_stop", None):
+        return {"decision": "allow"}
+    if payload.get("fullyIdle") is False:
+        return {"decision": "allow"}
+    exec_num = payload.get("executionNum", 0)
+    if payload.get("continuationActive") or not isinstance(exec_num, int) or exec_num >= 2:
+        return {"decision": "allow"}
+
+    roots = effective_roots(payload.get("workspacePaths") or [])
+    st = load_state(payload)
+    problems = _check_acceptance_and_edited_py(roots, st.edited_code_files)
+    if problems:
+        return {"decision": "continue", "reason": "External acceptance check failed: " + "; ".join(problems[:6])}
+
+    if st.unverified_code_edits:
+        return {
+            "decision": "continue",
+            "reason": "LIFECYCLE (Verify-Before-Stop): Workspace code was modified without a passing verification command afterward. Run tests before finishing.",
+        }
+
+    if st.edited_domain_dirs and len(roots) == 1:
+        gate = Path(roots[0]) / ".agents" / "scripts" / "crucible_gate.py"
+        if gate.is_file():
+            proc = subprocess.run(
+                [sys.executable, str(gate), "check", "--strict"],
+                cwd=roots[0],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+            if proc.returncode == 0:
+                st.edited_domain_dirs = []
+                save_state(payload, st)
+            else:
+                lines = [ln.strip() for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if ln.strip()]
+                detail = lines[-1] if lines else f"exit {proc.returncode}"
+                return {"decision": "continue", "reason": f"Outcome custody check failed: {detail}"}
+
+    if st.consecutive_tool_errors >= 3:
+        return {
+            "decision": "continue",
+            "reason": "Last three tools failed. Change method or report an honest blocker; do not repeat the same call.",
+        }
+
+    return {"decision": "allow"}

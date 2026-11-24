@@ -1,13 +1,13 @@
 {
-  "reliability_v4": {
+  "sentinel": {
     "enabled": true,
     "PreToolUse": [
       {
-        "matcher": "write_file|edit_file|read_file|run_command|call_mcp_tool|mcp_.*",
+        "matcher": "write_file|edit_file|run_command|call_mcp_tool|mcp_.*",
         "hooks": [
           {
             "type": "command",
-            "command": "python ./scripts/hook_v4.py pre",
+            "command": "python ./scripts/sentinel.py pre",
             "timeout": 5
           }
         ]
@@ -15,11 +15,11 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "read_file|write_file|edit_file|run_command",
         "hooks": [
           {
             "type": "command",
-            "command": "python ./scripts/hook_v4.py post",
+            "command": "python ./scripts/sentinel.py post",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python ./scripts/hook_v4.py stop",
+        "command": "python ./scripts/sentinel.py stop",
         "timeout": 15
       }
     ]
@@ -49,5 +49,8 @@
         "timeout": 5
       }
     ]
+  },
+  "reliability_v4": {
+    "enabled": false
   }
 }

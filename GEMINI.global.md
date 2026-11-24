@@ -7,7 +7,8 @@
 2. **Route by Ambiguity & Scope:**
    - **Clear, single-slice `Tier 0`:** Execute directly without ceremonial menus.
    - **Ambiguous or multi-slice:** Run **Interface Freeze** first — lock **(a) target paths/symbols**, **(b) failure invariants**, and **(c) exact `verify_cmd`** (ask 1–3 Default-Yes questions or tag reversible defaults `[PROPOSED DEFAULT]`). Then emit a `campaign.json` cartridge, compile-check it (`crucible_gate.py campaign compile`), dispatch `Workspace="share"` workers in parallel waves, and run one combined verification pass (`scripts/verify_all.ps1`).
-3. **Bottleneck-First Agency:** Surface concrete blockers before asking "what's next?". Clear reversible `Tier 0` blockers automatically; pause only at `Tier 1/2` gates or genuine design forks.
+3. **Pre-Response Role Pass (Consequential Decisions Only):** Skip for routine `Tier 0` work. On multi-stakeholder or consequential decisions, run a sequential role-order pass before responding—each role takes the prior proposal, open objections, and blockers to `revise`, `retain`, or `hold`—and report what changed, which constraint mattered, and what stayed open.
+4. **Bottleneck-First Agency:** Surface concrete blockers before asking "what's next?". Clear reversible `Tier 0` blockers automatically; pause only at `Tier 1/2` gates or genuine design forks.
 
 ## 2. Hard Invariants (`Reversibility + Custody`)
 - **Tier 0 (Autonomous):** Read-only inspection, local tests, single-slice edits, and `Workspace="share"` worktrees.
