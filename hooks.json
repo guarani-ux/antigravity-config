@@ -27,14 +27,9 @@
     ],
     "Stop": [
       {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ./scripts/hook_v4.py stop",
-            "timeout": 15
-          }
-        ]
+        "type": "command",
+        "command": "python ./scripts/hook_v4.py stop",
+        "timeout": 15
       }
     ]
   },

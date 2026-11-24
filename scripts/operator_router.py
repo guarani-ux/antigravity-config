@@ -14,22 +14,22 @@ from typing import Any
 
 SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
-        "wait_what",
+        "cpl_media",
         re.compile(
-            r"\b(wait what|talk normal|no anime|drop the anime|plain english)\b",
+            r"\b(calgary public library|cpl|youtube|pilot|writers[- ]?room|story[- ]?lane|av script|a/v script|cutdown|call sheet)\b",
             re.IGNORECASE,
         ),
-        "SIGNAL [plain-english]: Drop all lore, metaphors, and CS jargon immediately. "
-        "Re-pitch in 3 plain-English sentences using physical/studio cause-and-effect.",
+        "SIGNAL [outcome-media]: Pin Calgary Public Library/GROUND_TRUTH.md (Asana read-only). "
+        "Use writers-room / story-lane MCP spokes (K-MCP-01) and run cold-receiver-review (G05) + ig-evidence-review before handoff.",
     ),
     (
-        "ego_anchor",
+        "crucible_code",
         re.compile(
-            r"\b(hogyoku|power level|true potential|am i a 10x|how far have i come)\b",
+            r"\b(crucible_gate|campaign\.json|tx_patch|doctor\.py|router\.py|hook_v4|operator_router)\b",
             re.IGNORECASE,
         ),
-        "SIGNAL [recursive-meta-calibration]: Decline sycophancy or power-level praise. "
-        "Ground any assessment strictly in shipped end-to-end features, test outputs, and unshipped gaps.",
+        "SIGNAL [outcome-code]: Follow Orient -> Freeze -> Execute -> Verify. "
+        "Use slice-worker (Workspace='share') for multi-slice work and verify with scripts/verify_all.ps1.",
     ),
     (
         "av_craft",
@@ -187,7 +187,7 @@ def detect_prompt_signals(user_text: str) -> list[str]:
 
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
-    """Emit startup orientation carrying local WIP state (if present) and always-in mode-reframe modulator."""
+    """Emit startup orientation carrying local WIP state (if present)."""
     ledger = find_local_ledger(payload)
     if ledger:
         s = parse_ledger_summary(ledger)
@@ -196,20 +196,10 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             f"Hardened: {s['hardened']} | Challenged: {s['challenged']} | Raw Sparks: {s['raw']}."
         )
     else:
-        status = (
-            "Operator Bible posture active (Red/Yellow/Green slicing, idea-crucible before new folders, "
-            "plain-English OS custody). Central WSL ledger: "
-            "/home/flowe/.gemini/antigravity/scratch/operator_hub/IDEAS.md"
-        )
-    modulator = (
-        "MODE-REFRAME MODULATOR (Always-In): On any non-trivial problem, design, or process fork "
-        "(skip only for routine Tier 0 execution), modulate from the top of the totem pole before editing files: "
-        "(1) infer governing discipline(s) & altitude, (2) flag missing/uninspected info, "
-        "(3) compare 3 distinct paradigms + pitfalls, and (4) issue an Engage/Suppress/Gate Mobilization Directive."
-    )
+        status = "Global constitution active (Orient -> Freeze -> Execute -> Verify; Tier 0/1/2)."
     return {
         "injectSteps": [
-            {"systemMessage": {"systemMessage": f"{status}\n{modulator}"}}
+            {"systemMessage": {"systemMessage": status}}
         ]
     }
 

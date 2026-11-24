@@ -32,7 +32,8 @@ SESSION_UUID_RE = re.compile(
 )
 NEGATIVE_TOKEN_RE = re.compile(
     r"\b(?:assertFalse|assertNotEqual|assertNotIn|assertIsNone|assertRaises|raises|fail|"
-    r"BLOCKED|FAIL|deny|abstained|invalid|missing|error|returncode)\b"
+    r"BLOCKED|FAIL|deny|abstained|invalid|missing|error|mismatch|"
+    r"returncode\s*!=\s*0|returncode,\s*[1-9])\b"
 )
 
 ASSERT_METHOD_NAMES = {
@@ -245,6 +246,31 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                 "Tests pass `execute_hooks=False` / `--skip-exec` without any sibling test executing `execute_hooks=True`.",
             )
         )
+
+    for fn in test_funcs:
+        if "live" not in fn.name.lower():
+            continue
+        fn_exec_false = False
+        fn_exec_true = False
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "execute_hooks" and isinstance(kw.value, ast.Constant):
+                        if kw.value.value is False:
+                            fn_exec_false = True
+                        elif kw.value.value is True:
+                            fn_exec_true = True
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "--skip-exec" in node.value:
+                fn_exec_false = True
+        if fn_exec_false and not fn_exec_true:
+            findings.append(
+                TestQualityFinding(
+                    "TQ-04",
+                    filename,
+                    fn.lineno,
+                    f"`{fn.name}` claims live coverage while passing `execute_hooks=False` / `--skip-exec`.",
+                )
+            )
 
     lower_name = Path(filename).name.lower()
     claims_e2e = any(tok in lower_name for tok in ("e2e", "end_to_end", "integration")) or bool(

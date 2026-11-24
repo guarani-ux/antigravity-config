@@ -111,6 +111,39 @@ class TestTestQualityGate(unittest.TestCase):
             )
             self.assertEqual(good.returncode, 0, good.stdout)
 
+    def test_tq05_rejects_happy_path_returncode_zero_only(self) -> None:
+        """Fails if happy-path assertEqual(proc.returncode, 0) satisfies TQ-05 alone."""
+        bad_src = (
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_happy_cli(self):\n"
+            "        proc = run_ok()\n"
+            "        self.assertEqual(proc.returncode, 0)\n"
+            "    def test_math(self):\n"
+            "        self.assertEqual(1 + 1, 2)\n"
+        )
+        findings = test_quality_gate.check_test_source(bad_src, "test_happy_rc0.py")
+        rules = {f.rule_id for f in findings}
+        self.assertIn("TQ-05", rules, findings)
+
+    def test_tq04_rejects_live_named_test_skipping_hook_execution(self) -> None:
+        """Fails if a test named 'live' skips hooks even when a sibling executes them."""
+        bad_src = (
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_temp_hooks(self):\n"
+            "        rep = run_doctor(repo, execute_hooks=True)\n"
+            "        self.assertEqual(rep.fail_count, 0)\n"
+            "    def test_live_workspace_hooks(self):\n"
+            "        rep = run_doctor(repo, execute_hooks=False)\n"
+            "        self.assertEqual(rep.fail_count, 0)\n"
+            "    def test_rejects_bad(self):\n"
+            "        self.assertNotEqual('FAIL', 'PASS')\n"
+        )
+        findings = test_quality_gate.check_test_source(bad_src, "test_fake_live.py")
+        rules = {f.rule_id for f in findings}
+        self.assertIn("TQ-04", rules, findings)
+
 
 if __name__ == "__main__":
     unittest.main()
