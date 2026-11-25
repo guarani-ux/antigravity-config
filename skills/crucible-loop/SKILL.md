@@ -3,13 +3,19 @@ name: crucible-loop
 description: Thin-orchestrator, fresh-context execution loop (up to N rounds, default 12) for multi-step systems, spoke/media, and research campaigns. Orchestrates isolated workers via run_workflow, Campaign IR DAG compilation and CAS/FSM/ratchet state (campaign_ir.py), in-RAM Copy-on-Write file transactions (tx_patch.py), and single-command verification (scripts/verify_all.ps1). Use when the user asks to "run a crucible loop", "loop for N rounds", or "self-prompt until <target outcome>".
 ---
 
-# Crucible Loop v4 — Thin-Orchestrator + Fresh-Context Workers
+# Crucible Loop v4.1 — Thin-Orchestrator + Fresh-Context Workers + Anti-Goodhart Guards
 
-Execute multi-round campaigns using an `O(1)` parent orchestrator (`run_workflow` + `campaign_ir.py` + `tx_patch.py`) that dispatches fresh-context workers in isolated `workspace="share"` copies and merges only structured typed receipts back into parent state.
+Execute multi-round campaigns using an `O(1)` parent orchestrator (`run_workflow` + `campaign_ir.py` + `replay_loop.py` + `tx_patch.py`) that dispatches fresh-context workers in isolated `workspace="share"` copies, enforces worker-blind withheld holdouts and persistent counterexample ratchets on consequential slices, and merges only structured typed receipts back into parent state.
 
 ## 1. Loop Contract & Thin-Orchestrator Architecture
 - **Branch Isolation:** Create/checkout `loop/<slug>` in every touched repository (`main` remains untouched until operator-approved merge).
-- **Campaign IR (`campaign_ir.py`):** Load and validate `CampaignSpec` + `SliceNode` (`id`, `target_paths`, `depends_on`, `verify_cmd`, `input_sha256`) via `load_campaign_spec()` and `compile_campaign()` before Round 1 (path containment within `CRUCIBLE_ALLOWED_ROOTS` / `repo_root`, unique IDs, valid dependencies, acyclic DAG).
+- **Campaign IR (`campaign_ir.py`):** Load and validate `CampaignSpec` + `SliceNode` (`id`, `target_paths`, `depends_on`, `verify_cmd`, `input_sha256`, optional `withheld_verify_cmd`, `withheld_failure_category`, `verify_timeout_s`) via `load_campaign_spec()` and `compile_campaign()` before Round 1 (path containment within `CRUCIBLE_ALLOWED_ROOTS` / `repo_root`, unique IDs, valid dependencies, acyclic DAG).
+- **Automatic Anti-Goodhart Guards (High-Stakes / Non-Trivial Slices):**
+  - **Worker-Blind Holdout:** Whenever a slice has edge-case or encoding invariants, attach `withheld_verify_cmd` + a sanitized `withheld_failure_category`. `build_slice_worker_prompt()` strips withheld fields automatically; on failure, `replay_loop.py` rolls back and returns only the sanitized category.
+  - **Persistent Counterexample Ratchet:** On consequential slices, pass a persisted `CounterexampleRatchet(persist_path=...)` + active `objective` to `execute_replay_verified_slice()`. Confirmed counterexamples automatically roll back bad edits and persist as inherited probes for all subsequent rounds.
+  - **Hard Execution Timeouts:** Every verification command (`verify_timeout_s`, default `120s`) and counterexample probe (`30s`) runs under a hard subprocess timeout so hung commands roll back cleanly instead of stalling.
+  - **Closed-Loop ML Routing (`ram_ml_engine.py`):** Pass `ml_history_path` to `run_autonomous_campaign()` so every slice outcome feeds back into `ml_history.jsonl`, automatically escalating `recommended_model_tier` (`flash -> inherit -> pro`) and activating holdout + ratchet guards on files/slices with recurring failure history.
+  - **Zero-Token Chain Audit (`crucible_gate.py campaign audit`):** Before promoting a campaign's outcomes into reusable learning, run `crucible_gate.py campaign audit <spec.json> [<ledger.tsv>]` to replay every `KEEP` commit offline in an isolated worktree and verify scope, SHA-256 digests, and cumulative retention (`learning_eligible=True`).
 - **Wave Levelization:** Run `optimize_campaign(spec, receipt_cache)` to mark unchanged slices `SKIP_CACHED` (0 tokens) and schedule `CompiledCampaign.execution_waves` across parallel DAG levels.
 - **O(1) Parent Context:** The parent orchestrator uses `run_workflow` (`parallel` / `pipeline` + `agent(..., schema=WORKER_RESULT_SCHEMA, workspace="share")`) with `build_slice_worker_prompt()` so raw child logs, file reads, and stack traces never enter parent context.
 - **Round Budget:** Default `max_rounds = 12`; halt immediately once all exit criteria verify `passed=True`.
@@ -45,7 +51,7 @@ Every slice worker must enforce these four constraints before calling `finish`:
 ## 5. Three Domain Presets
 | Preset | Per-Round Verification Gate |
 | :--- | :--- |
-| **Systems / Code** | `pwsh -NoProfile -File scripts/verify_all.ps1` (or `crucible_gate.py check --strict` + `doctor` `0 WARN | 0 FAIL` + targeted `pytest`) |
+| **Systems / Code** | `python -m ruff check <touched .py>` + `pwsh -NoProfile -File scripts/verify_all.ps1` (or `crucible_gate.py check --strict` + `doctor` `0 WARN | 0 FAIL` + targeted `pytest`) |
 | **Spoke / Media** | Spoke `recognize -> prepare -> deliver` + `ig-evidence-review` (stage-matched per `K-MCP-01`) |
 | **Research / Architecture** | Source-cited artifact updated + local link/drift check (`crucible_gate.py doctor`) |
 

@@ -7,6 +7,12 @@
     "google-cloud-resource-manager": {
       "serverUrl": "https://cloudresourcemanager.googleapis.com/mcp",
       "authProviderType": "google_credentials"
+    },
+    "crucible-meter": {
+      "command": "python",
+      "args": [
+        "C:/Users/flowe/.gemini/config/scripts/crucible_meter_mcp.py"
+      ]
     }
   }
 }

@@ -15,7 +15,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "read_file|write_file|edit_file|run_command",
+        "matcher": "read_file|write_file|edit_file|run_command|call_mcp_tool|mcp_.*",
         "hooks": [
           {
             "type": "command",

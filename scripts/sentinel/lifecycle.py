@@ -12,6 +12,9 @@ from typing import Any
 
 from .ast_gate import check_write_integrity
 from .policy import (
+    MCP_MUTATING_TOKENS,
+    SHELL_MUTATION_RE,
+    TIER_1_2_SHELL_RE,
     check_mcp_call,
     check_shell_command,
     domain_bucket,
@@ -23,6 +26,15 @@ from .policy import (
     resolve_target,
 )
 from .state import STATE_FILENAME, load_state, save_state, state_path
+
+_SCRIPTS_ROOT = str(Path(__file__).resolve().parents[1])
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
+
+try:
+    import crucible_meter
+except Exception:
+    crucible_meter = None  # type: ignore[assignment]
 
 
 def _extract_path_arg(args: dict[str, Any]) -> Any:
@@ -49,6 +61,8 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         raw_target = _extract_path_arg(args)
         if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in (
             STATE_FILENAME,
+            "turn-meter-state.json",
+            "meter_receipts.jsonl",
             "reliability-events.jsonl",
         ):
             return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}
@@ -90,16 +104,41 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
             if subagent and dec in ("ask", "force_ask"):
                 dec = "deny"
             return {"decision": dec, "reason": rsn}
+        if crucible_meter is not None and matched_root is not None and not subagent:
+            ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, name, full)
+            if not ok_lease:
+                return {"decision": "deny", "reason": lease_reason}
         return {"decision": "allow", "reason": "Workspace edit verified."}
 
     if name in ("run_command", "command"):
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd")
         if not isinstance(cmd, str) or not cmd.strip():
             return {"decision": "deny" if subagent else "ask", "reason": "Cannot verify command text."}
-        return check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent)
+        shell_res = check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent)
+        if shell_res.get("decision") == "allow" and crucible_meter is not None and not subagent:
+            if crucible_meter.parse_cli_commit_command(cmd) is None and (
+                SHELL_MUTATION_RE.search(cmd) or TIER_1_2_SHELL_RE.search(cmd)
+            ):
+                ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, name, cmd)
+                if not ok_lease:
+                    return {"decision": "deny", "reason": lease_reason}
+        return shell_res
 
     if name == "call_mcp_tool" or name.startswith("mcp_"):
-        return check_mcp_call(name, args, subagent)
+        tool_name = str(args.get("ToolName") or name).lower()
+        if tool_name == "commit_intent" or tool_name.endswith("_commit_intent"):
+            return {"decision": "allow", "reason": "Intent commitment permitted."}
+        mcp_res = check_mcp_call(name, args, subagent)
+        if (
+            mcp_res.get("decision") in ("allow", "force_ask")
+            and crucible_meter is not None
+            and not subagent
+            and any(tok in tool_name for tok in MCP_MUTATING_TOKENS)
+        ):
+            ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, tool_name, tool_name)
+            if not ok_lease:
+                return {"decision": "deny", "reason": lease_reason}
+        return mcp_res
 
     return {"decision": "allow", "reason": "Unclassified tool permitted."}
 
@@ -115,6 +154,13 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
     name = str(tool.get("name") or "")
     args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
 
+    is_code_edit = False
+    is_verify_cmd = False
+    error_sig = ""
+    if failed:
+        err_val = payload.get("error")
+        error_sig = str(err_val)[:120] if err_val else name
+
     if name == "read_file" and not failed:
         st.oriented = True
         if st.repair_strikes >= 3:
@@ -125,6 +171,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
             rel, full, matched_root = res
             if matched_root is not None:
                 if is_code_file(full):
+                    is_code_edit = True
                     if full not in st.edited_code_files:
                         st.edited_code_files.append(full)
                     st.unverified_code_edits = True
@@ -135,6 +182,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
         st.oriented = True
         cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
         if is_meaningful_verification_command(cmd):
+            is_verify_cmd = True
             if failed:
                 if st.edited_code_files or st.unverified_code_edits:
                     st.repair_strikes += 1
@@ -145,6 +193,47 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                     st.edited_domain_dirs = []
 
     save_state(payload, st)
+    if crucible_meter is not None:
+        crucible_meter.record_tool_event(
+            payload,
+            tool_name=name,
+            failed=failed,
+            is_code_edit=is_code_edit,
+            is_verify_cmd=is_verify_cmd,
+            error_sig=error_sig,
+        )
+        # Mint or consume Intent Leases
+        mcp_tool_name = str(args.get("ToolName") or name).lower()
+        if not failed and (mcp_tool_name == "commit_intent" or mcp_tool_name.endswith("_commit_intent")):
+            intent_args = args.get("Arguments") if name == "call_mcp_tool" and isinstance(args.get("Arguments"), dict) else args
+            crucible_meter.mint_intent_lease(
+                payload,
+                intent=str(intent_args.get("intent") or ""),
+                middle=str(intent_args.get("middle") or ""),
+                expected_outcome=str(intent_args.get("expected_outcome") or ""),
+                targets=intent_args.get("targets") if isinstance(intent_args.get("targets"), list) else None,
+                wave_size=intent_args.get("wave_size") if isinstance(intent_args.get("wave_size"), int) else None,
+            )
+        elif name in ("run_command", "command"):
+            cmd_str = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
+            cli_commit = crucible_meter.parse_cli_commit_command(cmd_str)
+            if cli_commit is not None and not failed:
+                crucible_meter.mint_intent_lease(
+                    payload,
+                    intent=str(cli_commit.get("intent") or ""),
+                    middle=str(cli_commit.get("middle") or ""),
+                    expected_outcome=str(cli_commit.get("expected_outcome") or ""),
+                    targets=cli_commit.get("targets"),
+                    wave_size=cli_commit.get("wave_size"),
+                )
+            elif cli_commit is None and (SHELL_MUTATION_RE.search(cmd_str) or TIER_1_2_SHELL_RE.search(cmd_str)):
+                crucible_meter.consume_intent_lease(payload, failed=failed)
+        elif name in ("write_file", "edit_file"):
+            crucible_meter.consume_intent_lease(payload, failed=failed)
+        elif (name == "call_mcp_tool" or name.startswith("mcp_")) and any(
+            tok in mcp_tool_name for tok in MCP_MUTATING_TOKENS
+        ):
+            crucible_meter.consume_intent_lease(payload, failed=failed)
     return {}
 
 
@@ -242,5 +331,33 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
             "decision": "continue",
             "reason": "Last three tools failed. Change method or report an honest blocker; do not repeat the same call.",
         }
+
+    if crucible_meter is not None:
+        turn_state = crucible_meter.load_turn_state(payload)
+        resp_text = payload.get("lastAssistantResponse")
+        if not isinstance(resp_text, str):
+            resp_text = crucible_meter.extract_latest_planner_response(
+                crucible_meter.resolve_transcript_path(payload)
+            )
+        audit = crucible_meter.audit_turn_claims(turn_state, resp_text)
+
+        receipts_override = payload.get("receiptsPath") or os.environ.get("CRUCIBLE_METER_RECEIPTS_PATH")
+        should_log_receipt = bool(receipts_override) or (
+            not os.environ.get("PYTEST_CURRENT_TEST")
+            and (turn_state.turn > 0 or turn_state.tool_calls > 0 or audit["claims"]["has_meter_json"])
+        )
+        receipts_path = Path(receipts_override) if receipts_override else crucible_meter.DEFAULT_RECEIPTS_PATH
+
+        if not audit["ok"]:
+            if should_log_receipt:
+                crucible_meter.append_receipt(
+                    turn_state, audit, decision="continue", receipts_path=receipts_path
+                )
+            return {"decision": "continue", "reason": " ".join(audit["violations"])}
+
+        if should_log_receipt:
+            crucible_meter.append_receipt(
+                turn_state, audit, decision="allow", receipts_path=receipts_path
+            )
 
     return {"decision": "allow"}

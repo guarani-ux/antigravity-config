@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import crucible_meter
+
 SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "cpl_media",
@@ -114,6 +116,16 @@ SPEC_DOC_RE = re.compile(
     r"(?im)^\s*(?:WORKFLOW\s+\d+|#\s*PHASE\s+\d+|##\s*Final Execution Prompt|TARGET REPOSITORY:)"
 )
 TRACE_RE = re.compile(r"\b(?:traceback|stack trace)\b", re.IGNORECASE)
+TARGET_RANK_RE = re.compile(
+    r"\b(?:level\s*(9|10)|l(9|10)|rank\s*(9|10))\b",
+    re.IGNORECASE,
+)
+
+# Mechanical context-window pressure thresholds on compact transcript.jsonl
+CTX_WARN_KB = 350.0
+CTX_DEPLETED_KB = 600.0
+CTX_WARN_TURNS = 25
+CTX_DEPLETED_TURNS = 40
 
 SECTION_MAP = (
     ("stage 4:", "active"),
@@ -197,12 +209,24 @@ def detect_prompt_signals(user_text: str) -> list[str]:
 
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
-    """Emit minimal startup orientation without enforcing a rigid IDEAS.md ledger."""
-    return {
-        "injectSteps": [
-            {"systemMessage": {"systemMessage": "Global constitution active (Orient -> Freeze -> Execute -> Verify; Tier 0/1/2)."}}
-        ]
-    }
+    """Emit minimal startup orientation and surface any pending NEXT_SESSION_HANDOFF.md."""
+    steps: list[dict[str, Any]] = [
+        {"systemMessage": {"systemMessage": "Global constitution active (Orient -> Freeze -> Execute -> Verify; Tier 0/1/2)."}}
+    ]
+    handoff = Path.home() / ".gemini" / "NEXT_SESSION_HANDOFF.md"
+    if handoff.is_file():
+        steps.append(
+            {
+                "systemMessage": {
+                    "systemMessage": (
+                        f"PENDING HANDOFF READY at {handoff.as_posix()} — "
+                        "If the user says 'go' (or starts without specifying another task), "
+                        "read that file immediately and execute its mandate."
+                    )
+                }
+            }
+        )
+    return {"injectSteps": steps}
 
 
 def _already_emitted_for_prompt(payload: dict[str, Any], user_text: str) -> bool:
@@ -227,11 +251,48 @@ def _already_emitted_for_prompt(payload: dict[str, Any], user_text: str) -> bool
     return False
 
 
+def measure_turn_and_context_meter(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
+    """Mechanically measure two-axis context physics (active tokens + compactions) and L9/L10 target rank."""
+    transcript = crucible_meter.resolve_transcript_path(payload)
+    return crucible_meter.measure_transcript(transcript, user_text)
+
+
 def handle_pre_invocation(payload: dict[str, Any]) -> dict[str, Any]:
-    """Route incoming user intent once per user turn without per-tool-step flooding."""
+    """Route incoming user intent + Turn-Start Crucible Meter once per user turn without per-tool-step flooding."""
     user_text = str(payload.get("lastUserInput") or "")
+    if _already_emitted_for_prompt(payload, user_text):
+        return {"injectSteps": []}
+
     nudges = detect_prompt_signals(user_text)
-    if not nudges or _already_emitted_for_prompt(payload, user_text):
+    meter = measure_turn_and_context_meter(payload, user_text)
+    turn_state = crucible_meter.begin_turn(payload, user_text, meter)
+
+    if meter["target_rank"] in ("L9", "L10"):
+        nudges.append(
+            f"CRUCIBLE_TURN_METER {json.dumps(meter, separators=(',', ':'))} — "
+            f"TARGET-SEEKING MODE ({meter['target_rank']}): Run T0->T1->T2 gradient meter on (L,P,C,R), "
+            f"refuse symptom patches, attack argmin(L,P,C,R) first, emit JSON meter, and NEVER fake L10."
+        )
+
+    if meter["ctx_status"] == "DEPLETED":
+        draft_note = ""
+        art_dir = payload.get("artifactDirectoryPath")
+        if isinstance(art_dir, str) and art_dir.strip():
+            draft = crucible_meter.write_handoff_draft(Path(art_dir.strip()), meter, turn_state)
+            if draft is not None:
+                draft_note = f" Handoff draft written to {draft.as_posix()}."
+        nudges.append(
+            f"CRUCIBLE_TURN_METER {json.dumps(meter, separators=(',', ':'))} — "
+            f"CONTEXT WINDOW DEPLETED ({meter['rot_reason']}): Inform the user clearly at the end of your reply "
+            f"and recommend starting a fresh conversation (or /compact).{draft_note}"
+        )
+    elif meter["ctx_status"] == "WARN" and meter["target_rank"] not in ("L9", "L10"):
+        nudges.append(
+            f"CRUCIBLE_TURN_METER {json.dumps(meter, separators=(',', ':'))} — "
+            f"CONTEXT PRESSURE WARNING ({meter['rot_reason']}): Keep outputs compact and mention /compact or a fresh thread."
+        )
+
+    if not nudges:
         return {"injectSteps": []}
     return {
         "injectSteps": [

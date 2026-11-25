@@ -3,10 +3,21 @@
 Portable global rules, lifecycle hooks, routing scripts, and skills for Antigravity workspaces (including [Crucible-Domain](https://github.com/guarani-ux/Crucible-Domain)).
 
 ## Bootstrap on a New Machine
+
+**Windows (PowerShell):**
 ```powershell
 git clone https://github.com/guarani-ux/antigravity-config.git "$env:USERPROFILE\.gemini\config"
 & "$env:USERPROFILE\.gemini\config\bootstrap.ps1" -Force
 ```
+
+**macOS / Linux (Bash/Zsh):**
+```bash
+git clone https://github.com/guarani-ux/antigravity-config.git ~/.gemini/config
+chmod +x ~/.gemini/config/bootstrap.sh
+~/.gemini/config/bootstrap.sh --force
+```
+
+> **Note:** Marketplace plugins (`plugins/`) and machine-local state (`config.json`, `telemetry/`, `projects/`) are intentionally `.gitignore`d. Re-install Marketplace plugins once from the Antigravity UI on the new machine.
 
 ## What Lives Here vs. Machine-Local
 | Component | Status in Repo | Honest Notes & Known Gaps |

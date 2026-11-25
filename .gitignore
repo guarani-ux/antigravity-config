@@ -11,3 +11,4 @@ config.json
 .migrated
 skills/impeccable/scripts/bin/
 skills/impeccable/scripts/data/
+telemetry/
