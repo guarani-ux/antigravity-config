@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,8 @@ def load_state(payload: dict[str, Any]) -> SentinelState:
             edited_code_files=[str(x) for x in (raw.get("edited_code_files") or []) if isinstance(x, str)],
             edited_domain_dirs=[str(x) for x in (raw.get("edited_domain_dirs") or []) if isinstance(x, str)],
         )
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"sentinel state load error: {type(exc).__name__}", file=sys.stderr)
         return SentinelState()
 
 
@@ -55,10 +57,15 @@ def save_state(payload: dict[str, Any], state: SentinelState) -> None:
     sp = state_path(payload)
     if sp is None:
         return
+    tmp = sp.with_name(f".{sp.name}.{os.getpid()}.tmp")
     try:
         sp.parent.mkdir(parents=True, exist_ok=True)
-        tmp = sp.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(state), ensure_ascii=False) + "\n", encoding="utf-8")
         os.replace(tmp, sp)
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"sentinel state save error: {type(exc).__name__}", file=sys.stderr)
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass

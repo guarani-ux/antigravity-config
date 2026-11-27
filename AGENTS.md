@@ -1,2 +1,2 @@
 # AGENTS.md
-All global orchestrator and 4-mode rules are canonically defined in `C:/Users/flowe/.gemini/GEMINI.md` (already loaded in `<RULE[user_global]>`).
+Global rules live in `~/.gemini/GEMINI.md` (installed from `GEMINI.global.md` by `bootstrap.sh` / `bootstrap.ps1`). Mechanical lifecycle enforcement runs via `hooks.json` (`scripts/sentinel.py` and `scripts/operator_router.py`).

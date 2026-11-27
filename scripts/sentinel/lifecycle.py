@@ -12,9 +12,6 @@ from typing import Any
 
 from .ast_gate import check_write_integrity
 from .policy import (
-    MCP_MUTATING_TOKENS,
-    SHELL_MUTATION_RE,
-    TIER_1_2_SHELL_RE,
     check_mcp_call,
     check_shell_command,
     domain_bucket,
@@ -27,14 +24,11 @@ from .policy import (
 )
 from .state import STATE_FILENAME, load_state, save_state, state_path
 
-_SCRIPTS_ROOT = str(Path(__file__).resolve().parents[1])
-if _SCRIPTS_ROOT not in sys.path:
-    sys.path.insert(0, _SCRIPTS_ROOT)
-
-try:
-    import crucible_meter
-except Exception:
-    crucible_meter = None  # type: ignore[assignment]
+READ_TOOLS = ("read_file", "view_file")
+WRITE_TOOLS = ("write_file", "write_to_file")
+EDIT_TOOLS = ("edit_file", "replace_file_content", "multi_replace_file_content")
+MUTATE_FILE_TOOLS = WRITE_TOOLS + EDIT_TOOLS
+SHELL_TOOLS = ("run_command", "command")
 
 
 def _extract_path_arg(args: dict[str, Any]) -> Any:
@@ -42,6 +36,24 @@ def _extract_path_arg(args: dict[str, Any]) -> Any:
         if args.get(k) is not None:
             return args.get(k)
     return None
+
+
+def _extract_artifact_dir(payload: dict[str, Any]) -> str | None:
+    art = payload.get("artifactDirectoryPath")
+    return art.strip() if isinstance(art, str) and art.strip() else None
+
+
+def _is_tool_failed(payload: dict[str, Any]) -> bool:
+    if payload.get("error"):
+        return True
+    for container in (payload, payload.get("toolResult"), payload.get("result")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("exitCode", "exit_code", "returncode"):
+            val = container.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val != 0:
+                return True
+    return False
 
 
 def pre(payload: dict[str, Any]) -> dict[str, str]:
@@ -52,22 +64,22 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
     if not isinstance(args, dict):
         return {"decision": "deny" if subagent else "ask", "reason": "Cannot inspect tool arguments."}
 
-    if name == "read_file":
+    if name in READ_TOOLS:
         return {"decision": "allow", "reason": "Read operation permitted."}
 
     roots = payload.get("workspacePaths") or []
+    art_dir = _extract_artifact_dir(payload)
 
-    if name in ("write_file", "edit_file"):
+    if name in MUTATE_FILE_TOOLS:
         raw_target = _extract_path_arg(args)
         if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in (
             STATE_FILENAME,
-            "turn-meter-state.json",
-            "meter_receipts.jsonl",
+            "operator-router-seen.json",
             "reliability-events.jsonl",
         ):
             return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}
 
-        resolved = resolve_target(raw_target, roots)
+        resolved = resolve_target(raw_target, roots, artifact_dir=art_dir)
         if resolved is None:
             if subagent:
                 return {"decision": "deny", "reason": "Subagent cannot write outside mounted workspace."}
@@ -91,54 +103,29 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
                 not subagent
                 and (Path(matched_root) / ".git").exists()
                 and not st.oriented
-                and (is_code_file(full) or os.path.isfile(full))
+                and (is_code_file(full, art_dir) or os.path.isfile(full))
             ):
                 return {
                     "decision": "deny",
                     "reason": "LIFECYCLE (Orient-Before-Edit): Read an entry/target file or run an orientation check before mutating workspace files.",
                 }
 
-        issue = check_write_integrity(name, args, full)
+        issue = check_write_integrity(name, args, full, artifact_dir=art_dir)
         if issue is not None:
             dec, rsn = issue
             if subagent and dec in ("ask", "force_ask"):
                 dec = "deny"
             return {"decision": dec, "reason": rsn}
-        if crucible_meter is not None and matched_root is not None and not subagent:
-            ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, name, full)
-            if not ok_lease:
-                return {"decision": "deny", "reason": lease_reason}
         return {"decision": "allow", "reason": "Workspace edit verified."}
 
-    if name in ("run_command", "command"):
+    if name in SHELL_TOOLS:
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd")
         if not isinstance(cmd, str) or not cmd.strip():
             return {"decision": "deny" if subagent else "ask", "reason": "Cannot verify command text."}
-        shell_res = check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent)
-        if shell_res.get("decision") == "allow" and crucible_meter is not None and not subagent:
-            if crucible_meter.parse_cli_commit_command(cmd) is None and (
-                SHELL_MUTATION_RE.search(cmd) or TIER_1_2_SHELL_RE.search(cmd)
-            ):
-                ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, name, cmd)
-                if not ok_lease:
-                    return {"decision": "deny", "reason": lease_reason}
-        return shell_res
+        return check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent, artifact_dir=art_dir)
 
     if name == "call_mcp_tool" or name.startswith("mcp_"):
-        tool_name = str(args.get("ToolName") or name).lower()
-        if tool_name == "commit_intent" or tool_name.endswith("_commit_intent"):
-            return {"decision": "allow", "reason": "Intent commitment permitted."}
-        mcp_res = check_mcp_call(name, args, subagent)
-        if (
-            mcp_res.get("decision") in ("allow", "force_ask")
-            and crucible_meter is not None
-            and not subagent
-            and any(tok in tool_name for tok in MCP_MUTATING_TOKENS)
-        ):
-            ok_lease, lease_reason = crucible_meter.check_intent_lease(payload, tool_name, tool_name)
-            if not ok_lease:
-                return {"decision": "deny", "reason": lease_reason}
-        return mcp_res
+        return check_mcp_call(name, args, subagent)
 
     return {"decision": "allow", "reason": "Unclassified tool permitted."}
 
@@ -147,93 +134,46 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
     if state_path(payload) is None:
         return {}
     st = load_state(payload)
-    failed = bool(payload.get("error"))
+    failed = _is_tool_failed(payload)
     st.consecutive_tool_errors = (st.consecutive_tool_errors + 1) if failed else 0
 
     tool = payload.get("toolCall") or {}
     name = str(tool.get("name") or "")
     args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+    art_dir = _extract_artifact_dir(payload)
 
-    is_code_edit = False
-    is_verify_cmd = False
-    error_sig = ""
-    if failed:
-        err_val = payload.get("error")
-        error_sig = str(err_val)[:120] if err_val else name
-
-    if name == "read_file" and not failed:
+    if name in READ_TOOLS and not failed:
         st.oriented = True
         if st.repair_strikes >= 3:
             st.repair_strikes = 2
-    elif name in ("write_file", "edit_file") and not failed:
-        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [])
+    elif name in MUTATE_FILE_TOOLS and not failed:
+        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir)
         if res is not None:
             rel, full, matched_root = res
             if matched_root is not None:
-                if is_code_file(full):
-                    is_code_edit = True
+                if is_code_file(full, art_dir):
                     if full not in st.edited_code_files:
                         st.edited_code_files.append(full)
                     st.unverified_code_edits = True
                 dom = domain_bucket(rel)
                 if dom and dom not in st.edited_domain_dirs:
                     st.edited_domain_dirs.append(dom)
-    elif name in ("run_command", "command"):
-        st.oriented = True
+    elif name in SHELL_TOOLS:
+        if not failed:
+            st.oriented = True
         cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
         if is_meaningful_verification_command(cmd):
-            is_verify_cmd = True
             if failed:
-                if st.edited_code_files or st.unverified_code_edits:
+                if st.unverified_code_edits:
                     st.repair_strikes += 1
             else:
                 st.repair_strikes = 0
                 st.unverified_code_edits = False
+                st.edited_code_files = []
                 if "crucible_gate.py" in cmd.lower() or "verify_all.ps1" in cmd.lower():
                     st.edited_domain_dirs = []
 
     save_state(payload, st)
-    if crucible_meter is not None:
-        crucible_meter.record_tool_event(
-            payload,
-            tool_name=name,
-            failed=failed,
-            is_code_edit=is_code_edit,
-            is_verify_cmd=is_verify_cmd,
-            error_sig=error_sig,
-        )
-        # Mint or consume Intent Leases
-        mcp_tool_name = str(args.get("ToolName") or name).lower()
-        if not failed and (mcp_tool_name == "commit_intent" or mcp_tool_name.endswith("_commit_intent")):
-            intent_args = args.get("Arguments") if name == "call_mcp_tool" and isinstance(args.get("Arguments"), dict) else args
-            crucible_meter.mint_intent_lease(
-                payload,
-                intent=str(intent_args.get("intent") or ""),
-                middle=str(intent_args.get("middle") or ""),
-                expected_outcome=str(intent_args.get("expected_outcome") or ""),
-                targets=intent_args.get("targets") if isinstance(intent_args.get("targets"), list) else None,
-                wave_size=intent_args.get("wave_size") if isinstance(intent_args.get("wave_size"), int) else None,
-            )
-        elif name in ("run_command", "command"):
-            cmd_str = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
-            cli_commit = crucible_meter.parse_cli_commit_command(cmd_str)
-            if cli_commit is not None and not failed:
-                crucible_meter.mint_intent_lease(
-                    payload,
-                    intent=str(cli_commit.get("intent") or ""),
-                    middle=str(cli_commit.get("middle") or ""),
-                    expected_outcome=str(cli_commit.get("expected_outcome") or ""),
-                    targets=cli_commit.get("targets"),
-                    wave_size=cli_commit.get("wave_size"),
-                )
-            elif cli_commit is None and (SHELL_MUTATION_RE.search(cmd_str) or TIER_1_2_SHELL_RE.search(cmd_str)):
-                crucible_meter.consume_intent_lease(payload, failed=failed)
-        elif name in ("write_file", "edit_file"):
-            crucible_meter.consume_intent_lease(payload, failed=failed)
-        elif (name == "call_mcp_tool" or name.startswith("mcp_")) and any(
-            tok in mcp_tool_name for tok in MCP_MUTATING_TOKENS
-        ):
-            crucible_meter.consume_intent_lease(payload, failed=failed)
     return {}
 
 
@@ -246,41 +186,43 @@ def _check_acceptance_and_edited_py(roots: list[str], edited_code_files: list[st
             except (SyntaxError, OSError, UnicodeError, ValueError) as exc:
                 problems.append(f"Edited Python file failed AST parse: {os.path.basename(py_path)} ({type(exc).__name__})")
 
-    if len(roots) != 1:
-        return problems
-    root = Path(roots[0])
-    manifest = root / ".agents" / "acceptance.lock.json"
-    if not manifest.is_file():
-        return problems
-    try:
-        contract = json.loads(manifest.read_text(encoding="utf-8"))
-        if not isinstance(contract, dict):
-            return ["Acceptance contract must be a JSON object."] + problems
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return ["Acceptance contract cannot be parsed."] + problems
-
-    req_files = contract.get("required_files", [])
-    if not isinstance(req_files, list):
-        return ["Acceptance required_files is not a list."] + problems
-    for rel in req_files[:100]:
-        res = resolve_target(rel, [str(root)])
-        if res is None or res[2] is None:
-            problems.append(f"Acceptance path escapes workspace: {rel}")
+    for root_str in roots:
+        root = Path(root_str)
+        manifest = root / ".agents" / "acceptance.lock.json"
+        if not manifest.is_file():
             continue
-        if not os.path.isfile(res[1]) or os.path.getsize(res[1]) == 0:
-            problems.append(f"Missing or empty required file: {rel}")
+        try:
+            contract = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(contract, dict):
+                problems.append(f"Acceptance contract must be a JSON object ({manifest}).")
+                continue
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            problems.append(f"Acceptance contract cannot be parsed ({manifest}).")
+            continue
 
-    py_files = contract.get("python_syntax", [])
-    if isinstance(py_files, list):
-        for rel in py_files[:100]:
+        req_files = contract.get("required_files", [])
+        if not isinstance(req_files, list):
+            problems.append("Acceptance required_files is not a list.")
+            continue
+        for rel in req_files[:100]:
             res = resolve_target(rel, [str(root)])
             if res is None or res[2] is None:
-                problems.append(f"Python syntax path escapes workspace: {rel}")
+                problems.append(f"Acceptance path escapes workspace: {rel}")
                 continue
-            try:
-                ast.parse(Path(res[1]).read_text(encoding="utf-8"), filename=res[1])
-            except (SyntaxError, OSError, UnicodeError, ValueError) as exc:
-                problems.append(f"Python file did not parse: {rel} ({type(exc).__name__})")
+            if not os.path.isfile(res[1]) or os.path.getsize(res[1]) == 0:
+                problems.append(f"Missing or empty required file: {rel}")
+
+        py_files = contract.get("python_syntax", [])
+        if isinstance(py_files, list):
+            for rel in py_files[:100]:
+                res = resolve_target(rel, [str(root)])
+                if res is None or res[2] is None:
+                    problems.append(f"Python syntax path escapes workspace: {rel}")
+                    continue
+                try:
+                    ast.parse(Path(res[1]).read_text(encoding="utf-8"), filename=res[1])
+                except (SyntaxError, OSError, UnicodeError, ValueError) as exc:
+                    problems.append(f"Python file did not parse: {rel} ({type(exc).__name__})")
     return problems
 
 
@@ -305,59 +247,35 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
             "reason": "LIFECYCLE (Verify-Before-Stop): Workspace code was modified without a passing verification command afterward. Run tests before finishing.",
         }
 
-    if st.edited_domain_dirs and len(roots) == 1:
-        gate = Path(roots[0]) / ".agents" / "scripts" / "crucible_gate.py"
-        if gate.is_file():
-            proc = subprocess.run(
-                [sys.executable, str(gate), "check", "--strict"],
-                cwd=roots[0],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                check=False,
-            )
-            if proc.returncode == 0:
-                st.edited_domain_dirs = []
-                save_state(payload, st)
-            else:
+    if st.edited_domain_dirs:
+        for root_str in roots:
+            gate = Path(root_str) / ".agents" / "scripts" / "crucible_gate.py"
+            if not gate.is_file():
+                continue
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(gate), "check", "--strict"],
+                    cwd=root_str,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return {"decision": "continue", "reason": "Outcome custody check timed out (>5s)."}
+            if proc.returncode != 0:
                 lines = [ln.strip() for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if ln.strip()]
                 detail = lines[-1] if lines else f"exit {proc.returncode}"
                 return {"decision": "continue", "reason": f"Outcome custody check failed: {detail}"}
+        st.edited_domain_dirs = []
+        save_state(payload, st)
 
     if st.consecutive_tool_errors >= 3:
         return {
             "decision": "continue",
             "reason": "Last three tools failed. Change method or report an honest blocker; do not repeat the same call.",
         }
-
-    if crucible_meter is not None:
-        turn_state = crucible_meter.load_turn_state(payload)
-        resp_text = payload.get("lastAssistantResponse")
-        if not isinstance(resp_text, str):
-            resp_text = crucible_meter.extract_latest_planner_response(
-                crucible_meter.resolve_transcript_path(payload)
-            )
-        audit = crucible_meter.audit_turn_claims(turn_state, resp_text)
-
-        receipts_override = payload.get("receiptsPath") or os.environ.get("CRUCIBLE_METER_RECEIPTS_PATH")
-        should_log_receipt = bool(receipts_override) or (
-            not os.environ.get("PYTEST_CURRENT_TEST")
-            and (turn_state.turn > 0 or turn_state.tool_calls > 0 or audit["claims"]["has_meter_json"])
-        )
-        receipts_path = Path(receipts_override) if receipts_override else crucible_meter.DEFAULT_RECEIPTS_PATH
-
-        if not audit["ok"]:
-            if should_log_receipt:
-                crucible_meter.append_receipt(
-                    turn_state, audit, decision="continue", receipts_path=receipts_path
-                )
-            return {"decision": "continue", "reason": " ".join(audit["violations"])}
-
-        if should_log_receipt:
-            crucible_meter.append_receipt(
-                turn_state, audit, decision="allow", receipts_path=receipts_path
-            )
 
     return {"decision": "allow"}

@@ -16,12 +16,13 @@ DOMAIN_DIRS = ("calgary public library", "personal work", "graphs")
 
 HARD_PROTECTED_BASENAMES = {
     "sentinel-state.json",
-    "turn-meter-state.json",
-    "meter_receipts.jsonl",
+    "operator-router-seen.json",
     "reliability-events.jsonl",
     "hooks.json",
     "hooks.json.portable",
     "sentinel.py",
+    "operator_router.py",
+    "test_quality_gate.py",
     "acceptance.lock.json",
     ".env",
     "agents.md",
@@ -49,17 +50,19 @@ CATASTROPHIC_SHELL_RE = re.compile(
 TIER_1_2_SHELL_RE = re.compile(
     r"(?i)(?:"
     r"\brm\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b|"
-    r"(?:^|[;&|]\s*)(?:rmdir|Remove-Item|rm|del|unlink)\b|"
-    r"\bgit\s+(?:reset\s+--hard|restore\s+\.|checkout\s+--\s+\.|branch\s+-[a-z]*d|push)\b|"
-    r"\bgh\s+(?:pr\s+merge|release)\b|"
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:rmdir|Remove-Item|rm|del|unlink)\b|"
+    r"(?:^|[;&|]\s*)git\s+(?:reset\s+--hard|restore\s+\.|checkout\s+--\s+\.|branch\s+-[a-z]*d|push)\b|"
+    r"(?:^|[;&|]\s*)gh\s+(?:pr\s+merge|release)\b|"
     r"\b(?:npm\s+publish|twine\s+upload|terraform\s+apply|kubectl\s+(?:apply|delete|create))\b|"
     r"\b(?:pip\s+install|npm\s+(?:install|i|uninstall|remove)|poetry\s+add)\b|"
     r"\bDROP\s+TABLE\b"
     r")"
 )
 
+_HARMLESS_REDIRECT_RE = re.compile(r"(?:\d*>&\d+|(?:\d*)?>\s*/dev/null)", re.IGNORECASE)
+
 SHELL_MUTATION_RE = re.compile(
-    r"(?i)(?:>|>>|\b(?:set-content|add-content|out-file|remove-item|move-item|copy-item)\b|"
+    r"(?i)(?:>|>>|\b(?:set-content|add-content|out-file|remove-item|move-item|copy-item|cp|mv|tee)\b|"
     r"\bsed\s+-i|\bwrite_text\b|\bwrite_bytes\b|\bos\.replace\b|\bshutil\.|"
     r"\bopen\s*\([^)]*,\s*['\"][wa+])"
 )
@@ -69,20 +72,40 @@ GOV_COMMAND_TOKENS = (
     ".agents/acceptance.lock.json",
     ".gemini/config/hooks.json",
     "sentinel.py",
+    "operator_router.py",
+    "test_quality_gate.py",
     "scripts/sentinel",
     "sentinel-state.json",
-    "turn-meter-state.json",
-    "meter_receipts.jsonl",
+    "operator-router-seen.json",
     "reliability-events.jsonl",
 )
 
-MCP_MUTATING_TOKENS = (
-    "deploy", "delete", "create", "update", "reset", "stop", "start", "set_", "init", "upload",
+MCP_MUTATING_RE = re.compile(
+    r"(?:^|[_\-/.])(?:deploy|delete|create|update|reset|stop|start|set|init|upload|"
+    r"write|edit|patch|merge|push|send|move|rename|share|add|remove|comment|mutate|trash)(?:$|[_\-/.])",
+    re.IGNORECASE,
 )
+
+BRAIN_PATH_RE = re.compile(r"/\.gemini/(?:antigravity|jetski)/(?:brain|scratch)/", re.IGNORECASE)
+ENV_FILE_RE = re.compile(r"(?:^|[\s'\"/\\])\.env(?:\.(?:local|production|prod|development|dev|staging))?(?=$|[\s'\"/\\])", re.IGNORECASE)
 
 
 def is_subagent(payload: dict[str, Any]) -> bool:
     return bool(payload.get("parentConversationId") or os.environ.get("ANTIGRAVITY_SUBAGENT"))
+
+
+def is_brain_or_artifact_path(full_abs: str, artifact_dir: str | None = None) -> bool:
+    norm_full = full_abs.replace("\\", "/").lower()
+    if BRAIN_PATH_RE.search(norm_full):
+        return True
+    if isinstance(artifact_dir, str) and artifact_dir.strip():
+        art_real = os.path.realpath(os.path.abspath(os.path.expanduser(artifact_dir.strip())))
+        try:
+            if os.path.commonpath([os.path.normcase(art_real), os.path.normcase(full_abs)]) == os.path.normcase(art_real):
+                return True
+        except ValueError:
+            pass
+    return False
 
 
 def effective_roots(workspace_paths: Any) -> list[str]:
@@ -98,16 +121,25 @@ def effective_roots(workspace_paths: Any) -> list[str]:
     return roots
 
 
-def resolve_target(target: Any, workspace_paths: Any) -> tuple[str, str, str | None] | None:
+def resolve_target(
+    target: Any,
+    workspace_paths: Any,
+    *,
+    artifact_dir: str | None = None,
+    cwd: str | None = None,
+) -> tuple[str, str, str | None] | None:
     """Return (norm_rel_or_abs, full_abs, matched_root_or_None)."""
     if not isinstance(target, str) or not target.strip():
         return None
     roots = effective_roots(workspace_paths)
     cand = os.path.expanduser(target.strip())
     if not os.path.isabs(cand):
-        if len(roots) != 1:
+        if isinstance(cwd, str) and cwd.strip():
+            cand = os.path.join(os.path.expanduser(cwd.strip()), cand)
+        elif len(roots) == 1:
+            cand = os.path.join(roots[0], cand)
+        else:
             return None
-        cand = os.path.join(roots[0], cand)
     full = os.path.realpath(os.path.abspath(cand))
     for r in roots:
         try:
@@ -116,9 +148,8 @@ def resolve_target(target: Any, workspace_paths: Any) -> tuple[str, str, str | N
                 return rel, full, r
         except ValueError:
             continue
-    norm_full = full.replace("\\", "/").lower()
-    if "/.gemini/antigravity/brain/" in norm_full or "/.gemini/antigravity/scratch/" in norm_full:
-        return norm_full, full, None
+    if is_brain_or_artifact_path(full, artifact_dir):
+        return full.replace("\\", "/").lower(), full, None
     return None
 
 
@@ -130,21 +161,16 @@ def is_protected_path(rel_or_abs: str, full_abs: str) -> bool:
     return any(norm == p or norm.startswith(p + "/") or ("/" + p + "/") in ("/" + norm + "/") for p in PROTECTED_REL_PREFIXES)
 
 
-def is_code_file(full_abs: str) -> bool:
-    norm = full_abs.replace("\\", "/").lower()
-    if "/.gemini/antigravity/" in norm:
+def is_code_file(full_abs: str, artifact_dir: str | None = None) -> bool:
+    if is_brain_or_artifact_path(full_abs, artifact_dir):
         return False
+    norm = full_abs.replace("\\", "/").lower()
     return norm.endswith(CODE_EXTS)
 
 
 def is_test_file(full_abs: str) -> bool:
-    norm = full_abs.replace("\\", "/").lower()
-    base = os.path.basename(norm)
-    return (
-        base.startswith("test_")
-        or base.endswith(("_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"))
-        or "/tests/" in norm
-    )
+    base = os.path.basename(full_abs.replace("\\", "/")).lower()
+    return base.startswith("test_") or base.endswith(("_test.py", ".test.ts", ".test.js", ".spec.ts", ".spec.js"))
 
 
 def domain_bucket(rel: str) -> str | None:
@@ -153,21 +179,34 @@ def domain_bucket(rel: str) -> str | None:
 
 
 def is_meaningful_verification_command(cmd: Any) -> bool:
-    """RW-13: True for real test/gate commands; False for version/status probes."""
+    """RW-13: True for real test/gate commands; False for version/help/status probes."""
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    c = cmd.strip().lower()
-    if re.search(r"(?:^|\s)(?:--version|-v|--help|-h)(?:\s|$)", c):
+    raw = cmd.strip()
+    # Reject --version / -V / --help / -h case-sensitively so verbose -v (unittest -v, pytest -v) passes
+    if re.search(r"(?:^|\s)(?:--version|-V|--help|-h)(?:\s|$)", raw):
         return False
-    if re.match(r"^(?:echo|dir|ls|pwd|whoami|get-childitem|get-content|type|cat|git\s+(?:status|diff|log|branch|show))\b", c):
+    c = raw.lower()
+    if re.match(r"^(?:echo|dir|ls|pwd|whoami|get-childitem|get-content|type|cat|touch|git\s+(?:status|diff|log|branch|show|add))\b", c):
         return False
     return bool(
-        re.search(r"\b(?:pytest|unittest|verify_all\.ps1|crucible_gate\.py\s+(?:check|doctor)|python3?|py|npm\s+(?:test|run)|cargo\s+test|go\s+test)\b", c)
+        re.search(
+            r"\b(?:pytest|unittest|verify_all\.ps1|crucible_gate\.py\s+(?:check|doctor)|"
+            r"test_quality_gate\.py|npm\s+(?:test|run\s+test)|cargo\s+test|go\s+test)\b",
+            c,
+        )
     )
 
 
-def check_shell_command(cmd: str, cwd: Any, roots: Any, subagent: bool) -> dict[str, str]:
-    if isinstance(cwd, str) and cwd.strip() and resolve_target(cwd, roots) is None:
+def check_shell_command(
+    cmd: str,
+    cwd: Any,
+    roots: Any,
+    subagent: bool,
+    *,
+    artifact_dir: str | None = None,
+) -> dict[str, str]:
+    if isinstance(cwd, str) and cwd.strip() and resolve_target(cwd, roots, artifact_dir=artifact_dir) is None:
         return {"decision": "deny" if subagent else "ask", "reason": "Command working directory is outside the workspace."}
 
     if CATASTROPHIC_SHELL_RE.search(cmd):
@@ -186,9 +225,10 @@ def check_shell_command(cmd: str, cwd: Any, roots: Any, subagent: bool) -> dict[
             return {"decision": "deny", "reason": f"Tier-1/Tier-2 destructive or external command prohibited in subagent: {cmd}"}
         return {"decision": "force_ask", "reason": "Tier-1/Tier-2 destructive or external command; requires explicit human approval."}
 
-    has_env = bool(re.search(r"(?:^|[\s'\"/\\])\.env(?:\b|$)", norm_cmd))
+    has_env = bool(ENV_FILE_RE.search(norm_cmd))
     has_gov = any(tok in norm_cmd for tok in GOV_COMMAND_TOKENS)
-    if has_env or (has_gov and SHELL_MUTATION_RE.search(norm_cmd)):
+    cleaned_for_mut = _HARMLESS_REDIRECT_RE.sub("", norm_cmd)
+    if has_env or (has_gov and SHELL_MUTATION_RE.search(cleaned_for_mut)):
         if subagent:
             return {"decision": "deny", "reason": "RW-04: Subagents cannot access .env or mutate protected governance/hook files."}
         return {"decision": "force_ask", "reason": "RW-04: Command references .env or mutates protected governance/hook files."}
@@ -198,7 +238,7 @@ def check_shell_command(cmd: str, cwd: Any, roots: Any, subagent: bool) -> dict[
 
 def check_mcp_call(name: str, args: dict[str, Any], subagent: bool) -> dict[str, str]:
     tool_name = str(args.get("ToolName") or name).lower()
-    if any(tok in tool_name for tok in MCP_MUTATING_TOKENS):
+    if MCP_MUTATING_RE.search(tool_name):
         if subagent:
             return {"decision": "deny", "reason": f"Tier 2 MCP External Gate prohibited in subagent: `{tool_name}`."}
         return {"decision": "force_ask", "reason": f"Tier 2 MCP External Gate: `{tool_name}` mutates external state; confirm first."}

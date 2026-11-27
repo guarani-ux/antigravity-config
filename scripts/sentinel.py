@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import sys
 
-from sentinel import post, pre, stop
+from sentinel import is_subagent, post, pre, stop
 
 
 def _emit(data: dict[str, object]) -> None:
@@ -19,16 +19,19 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"decision": "force_ask", "reason": "Invalid sentinel hook invocation."})
         return 0
     mode = args[0]
+    payload: dict[str, object] = {}
     try:
         raw = sys.stdin.read().strip()
-        payload = json.loads(raw) if raw else {}
-        if not isinstance(payload, dict):
+        loaded = json.loads(raw) if raw else {}
+        if not isinstance(loaded, dict):
             raise ValueError("Payload must be a JSON object")
+        payload = loaded
         handler = {"pre": pre, "post": post, "stop": stop}[mode]
         _emit(handler(payload))
     except Exception as exc:
         if mode == "pre":
-            _emit({"decision": "force_ask", "reason": "Sentinel could not inspect operation."})
+            decision = "deny" if is_subagent(payload) else "force_ask"
+            _emit({"decision": decision, "reason": "Sentinel could not inspect operation."})
         elif mode == "stop":
             _emit({"decision": "allow"})
         else:

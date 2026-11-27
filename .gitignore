@@ -8,7 +8,7 @@ sidecars/
 backups/
 guard_audit.log
 config.json
+hooks.json
+mcp_config.json
 .migrated
-skills/impeccable/scripts/bin/
-skills/impeccable/scripts/data/
 telemetry/
