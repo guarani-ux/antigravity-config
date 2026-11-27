@@ -291,8 +291,10 @@ def handle_pre_invocation(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    t0 = time.perf_counter()
     args = argv if argv is not None else sys.argv[1:]
     mode = args[0] if args else ""
+    out: dict[str, Any] = {}
     try:
         raw = sys.stdin.read().strip()
         payload = json.loads(raw) if raw else {}
@@ -309,6 +311,20 @@ def main(argv: list[str] | None = None) -> int:
         out = {}
 
     sys.stdout.write(json.dumps(out))
+    try:
+        from sentinel.telemetry import record_hook_event
+
+        steps = out.get("injectSteps") if isinstance(out, dict) else []
+        n = len(steps) if isinstance(steps, list) else 0
+        record_hook_event(
+            mode or "router",
+            "operator_router",
+            "emit" if n > 0 else "abstain",
+            f"nudges={n}" if n > 0 else "",
+            (time.perf_counter() - t0) * 1000.0,
+        )
+    except Exception as exc:
+        print(f"operator_router telemetry error: {type(exc).__name__}", file=sys.stderr)
     return 0
 
 

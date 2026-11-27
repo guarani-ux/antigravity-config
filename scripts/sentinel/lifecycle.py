@@ -75,6 +75,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in (
             STATE_FILENAME,
             "operator-router-seen.json",
+            "hook-events.jsonl",
             "reliability-events.jsonl",
         ):
             return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}

@@ -14,7 +14,38 @@ from .policy import is_brain_or_artifact_path, is_test_file
 FORBIDDEN_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 LAZY_PLACEHOLDER_RE = re.compile(r"(?i)(?://|#)\s*\.\.\.\s*(?:existing|unchanged|rest\s+of)\s+code")
 
+SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("GitHub token", re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})(?![A-Za-z0-9_])")),
+    ("AWS access key", re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])")),
+    ("Google API key", re.compile(r"(?<![A-Za-z0-9\-_])AIza[0-9A-Za-z\-_]{35}(?![A-Za-z0-9\-_])")),
+    ("OpenAI/Anthropic API key", re.compile(r"(?<![A-Za-z0-9\-_])sk-(?:(?:proj-|svcacct-|ant-api\d+-)[A-Za-z0-9\-_]{20,}|[A-Za-z0-9]{48})(?![A-Za-z0-9\-_])")),
+    ("Stripe live key", re.compile(r"(?<![A-Za-z0-9_])(?:sk|rk)_live_[0-9A-Za-z]{24,}(?![A-Za-z0-9_])")),
+    ("Slack token", re.compile(r"(?<![A-Za-z0-9\-])xox[baprs]-[0-9A-Za-z\-]{10,}(?![A-Za-z0-9\-])|(?<![A-Za-z0-9\-])xapp-\d-[A-Za-z0-9\-]{10,}(?![A-Za-z0-9\-])")),
+    ("HuggingFace/PyPI token", re.compile(r"(?<![A-Za-z0-9_])(?:hf_[A-Za-z0-9]{30,}|pypi-[A-Za-z0-9\-_]{50,})(?![A-Za-z0-9\-_])")),
+    ("database URI credential", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]{8,}@[^/\s]+", re.IGNORECASE)),
+    ("private key PEM block", re.compile(r"-----BEGIN (?:PGP PRIVATE KEY BLOCK|(?:RSA |EC |ECDSA |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----")),
+)
+
+_PLACEHOLDER_SECRET_RE = re.compile(r"(?:EXAMPLE|DUMMY|PLACEHOLDER|FAKE_?KEY|YOUR_?(?:KEY|TOKEN|PASS)|CHANGE_?ME|XXXX+|000000)", re.IGNORECASE)
+
 _SCRIPTS_ROOT = str(Path(__file__).resolve().parents[1])
+
+
+def _secret_matches(text: str) -> list[tuple[str, str]]:
+    hits: list[tuple[str, str]] = []
+    for label, pat in SECRET_PATTERNS:
+        for m in pat.finditer(text):
+            tok = m.group(0)
+            if label != "private key PEM block" and _PLACEHOLDER_SECRET_RE.search(tok):
+                continue
+            hits.append((label, tok))
+    return hits
+
+
+def detect_secret_leak(text: str) -> str | None:
+    """Return secret category label if text contains a live-looking credential, else None."""
+    hits = _secret_matches(text)
+    return hits[0][0] if hits else None
 
 
 def _is_noop_stmt(stmt: ast.stmt) -> bool:
@@ -180,6 +211,9 @@ def check_write_integrity(
         new_text = _extract_write_text(args)
         if new_text is None:
             return ("ask", "Could not inspect write content arguments; review required.")
+        secret_hit = detect_secret_leak(new_text)
+        if secret_hit is not None:
+            return ("deny", f"RW-18 (Secret Leak Blocked): Detected {secret_hit} in file write. Store secrets in env vars, never in files.")
         m = FORBIDDEN_CONTROL_RE.search(new_text)
         if m:
             return ("deny", f"FM-H02 (Control-Byte Corruption): Forbidden ASCII byte 0x{ord(m.group(0)):02x} at offset {m.start()}.")
@@ -199,6 +233,9 @@ def check_write_integrity(
                 return ("deny", "FM-H03 (Empty Target): Empty edit target is prohibited.")
             if old_text == new_text:
                 return ("deny", "Exact no-op edit (`Target == Replacement`); change the target logic.")
+            secret_hit = detect_secret_leak(new_text)
+            if secret_hit is not None:
+                return ("deny", f"RW-18 (Secret Leak Blocked): Detected {secret_hit} in file edit. Store secrets in env vars, never in files.")
             m = FORBIDDEN_CONTROL_RE.search(new_text)
             if m:
                 return ("deny", f"FM-H02 (Control-Byte Corruption): Forbidden ASCII byte 0x{ord(m.group(0)):02x} at offset {m.start()}.")
@@ -220,6 +257,15 @@ def check_write_integrity(
                 return ("ask", "Broad deletion (>50% of existing lines); review proposed diff.")
     else:
         return None
+
+    # Catch split-write (Append=True) and split-edit secret assembly on full candidate
+    if isinstance(candidate, str):
+        old_hits = _secret_matches(existing) if existing else []
+        new_hits = _secret_matches(candidate)
+        if len(new_hits) > len(old_hits):
+            existing_set = {tok for _, tok in old_hits}
+            added_label = next((lbl for lbl, tok in new_hits if tok not in existing_set), new_hits[0][0])
+            return ("deny", f"RW-18 (Secret Leak Blocked): Detected {added_label} in assembled file content. Store secrets in env vars, never in files.")
 
     if not abs_path.lower().endswith(".py") or not isinstance(candidate, str):
         return None

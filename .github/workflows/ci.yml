@@ -1,0 +1,57 @@
+name: Antigravity Config CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bootstrap dry-run (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          TMP_ROOT=$(mktemp -d)
+          mkdir -p "$TMP_ROOT/config"
+          cp -r . "$TMP_ROOT/config/"
+          bash "$TMP_ROOT/config/bootstrap.sh" --force
+          python3 "$TMP_ROOT/config/scripts/doctor.py" --config-dir "$TMP_ROOT/config" --gemini-dir "$TMP_ROOT" --check-installed --strict
+          rm -rf "$TMP_ROOT"
+
+      - name: Run bootstrap dry-run (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tmpRoot = Join-Path $env:RUNNER_TEMP "ag-boot-test"
+          $cfgDir = Join-Path $tmpRoot "config"
+          New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+          Copy-Item -Path . -Destination $cfgDir -Recurse -Force
+          & (Join-Path $cfgDir "bootstrap.ps1") -Force
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python (Join-Path $cfgDir "scripts\doctor.py") --config-dir $cfgDir --gemini-dir $tmpRoot --check-installed --strict
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item -Recurse -Force $tmpRoot
+
+      - name: Run unit tests, TQ gate, doctor, and adversarial benchmark
+        shell: bash
+        env:
+          ANTIGRAVITY_TELEMETRY_DISABLED: "1"
+        run: |
+          python -m unittest discover -s scripts/tests -v
+          python scripts/test_quality_gate.py scripts/tests/test_*.py
+          python scripts/doctor.py --strict
+          python scripts/eval_harness.py

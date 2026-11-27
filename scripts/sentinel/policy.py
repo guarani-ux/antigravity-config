@@ -17,6 +17,7 @@ DOMAIN_DIRS = ("calgary public library", "personal work", "graphs")
 HARD_PROTECTED_BASENAMES = {
     "sentinel-state.json",
     "operator-router-seen.json",
+    "hook-events.jsonl",
     "reliability-events.jsonl",
     "hooks.json",
     "hooks.json.portable",
@@ -77,6 +78,7 @@ GOV_COMMAND_TOKENS = (
     "scripts/sentinel",
     "sentinel-state.json",
     "operator-router-seen.json",
+    "hook-events.jsonl",
     "reliability-events.jsonl",
 )
 

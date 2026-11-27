@@ -1,5 +1,0 @@
-interface:
-  display_name: "AV Craft"
-  short_description: "Shared vocabulary, storytelling principles, and anti-inclination mechanics for A/V scripts"
-policy:
-  allow_implicit_invocation: true

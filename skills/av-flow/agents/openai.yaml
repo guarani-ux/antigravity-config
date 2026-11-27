@@ -1,5 +1,0 @@
-interface:
-  display_name: "AV Flow"
-  short_description: "Router over the AV Story Skills suite"
-policy:
-  allow_implicit_invocation: false
