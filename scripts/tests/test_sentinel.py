@@ -184,11 +184,13 @@ class TestSentinelEnforcement(unittest.TestCase):
             still_blocked = sentinel.stop(idle_stop)
             self.assertEqual(still_blocked["decision"], "continue")
 
-            # Vacuous 0-test runs ("Ran 0 tests", "collected 0 items", "0 passed") must NOT clear Verify-Before-Stop
+            # Vacuous 0-test and all-skipped runs must NOT clear Verify-Before-Stop
             for vacuous_out in (
                 "Ran 0 tests in 0.000s\n\nOK\n",
                 "collected 0 items\nno tests ran in 0.01s\n",
                 "test result: ok. 0 passed; 0 failed\n",
+                "3 skipped in 0.01s\n",
+                "Ran 2 tests in 0.001s\n\nOK (skipped=2)\n",
             ):
                 sentinel.post(
                     {
@@ -202,7 +204,18 @@ class TestSentinelEnforcement(unittest.TestCase):
             cont_stop = dict(idle_stop, continuationActive=True)
             self.assertEqual(sentinel.stop(cont_stop)["decision"], "allow")
 
-            # Multi-suite cargo test with 12 passed + 0 doc-tests MUST clear Verify-Before-Stop
+            # Partial-skip run with real passes (unittest) MUST clear Verify-Before-Stop
+            sentinel.post(
+                {
+                    **base,
+                    "toolResult": {"exitCode": 0, "stdout": "Ran 5 tests in 0.02s\n\nOK (skipped=2)\n"},
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -m unittest discover -s tests -v"}},
+                }
+            )
+            self.assertEqual(sentinel.stop(idle_stop)["decision"], "allow")
+
+            # Re-dirty and confirm multi-suite cargo test with 12 passed + 0 doc-tests MUST clear Verify-Before-Stop
+            sentinel.post({**base, "toolCall": {"name": "write_file", "args": {"Path": str(target), "Content": "a = 3\n"}}})
             cargo_out = (
                 "running 12 tests\n"
                 "test result: ok. 12 passed; 0 failed\n\n"

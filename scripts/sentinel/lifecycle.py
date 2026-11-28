@@ -32,10 +32,13 @@ EDIT_TOOLS = ("edit_file", "replace_file_content", "multi_replace_file_content")
 MUTATE_FILE_TOOLS = WRITE_TOOLS + EDIT_TOOLS
 SHELL_TOOLS = ("run_command", "command")
 VACUOUS_TEST_OUTPUT_RE = re.compile(
-    r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b)"
+    r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b|\b[1-9]\d*\s+skipped\b)"
 )
 NONZERO_TEST_OUTPUT_RE = re.compile(
     r"(?i)(?:\b[1-9]\d*\s+(?:passed|passing)\b|\bran\s+[1-9]\d*\s+tests?\b)"
+)
+UNITTEST_SKIPPED_RE = re.compile(
+    r"(?is)\bran\s+([1-9]\d*)\s+tests?\b.*\bok\s*\(\s*skipped\s*=\s*(\d+)\s*\)"
 )
 
 
@@ -65,7 +68,7 @@ def _is_tool_failed(payload: dict[str, Any]) -> bool:
 
 
 def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
-    """Return True if captured command output explicitly shows 0 tests executed (and no non-zero suite passed)."""
+    """Return True if captured command output explicitly shows 0 tests executed or all tests skipped."""
     chunks: list[str] = []
     for container in (payload, payload.get("toolResult"), payload.get("result")):
         if not isinstance(container, dict):
@@ -77,6 +80,9 @@ def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
     if not chunks:
         return False
     combined = "\n".join(chunks)
+    m_unit = UNITTEST_SKIPPED_RE.search(combined)
+    if m_unit and int(m_unit.group(2)) >= int(m_unit.group(1)):
+        return True
     if NONZERO_TEST_OUTPUT_RE.search(combined):
         return False
     return bool(VACUOUS_TEST_OUTPUT_RE.search(combined))
