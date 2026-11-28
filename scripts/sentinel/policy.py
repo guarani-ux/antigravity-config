@@ -203,65 +203,115 @@ def domain_bucket(rel: str) -> str | None:
     return first if first in DOMAIN_DIRS else None
 
 
-def _strip_shell_comments(raw: str) -> str:
-    out: list[str] = []
+def _scan_shell(raw: str) -> tuple[str, list[tuple[str, str]]]:
+    """Single escape-aware finite-state shell lexer.
+
+    Returns (unquoted_uncommented_text, [(segment_text, following_operator), ...]).
+    Handles backslash escapes (outside single quotes), single/double quotes,
+    per-line `#` comments, and `&&`, `||`, `&`, `;`, `|`, `\\n`, `\\r` operators.
+    """
+    unquoted_buf: list[str] = []
+    segs: list[tuple[str, str]] = []
+    seg_buf: list[str] = []
     in_s = False
     in_d = False
     in_comment = False
-    for i, ch in enumerate(raw):
+    i = 0
+    n = len(raw)
+
+    while i < n:
+        ch = raw[i]
         if ch in ("\n", "\r"):
-            in_comment = False
-            out.append(ch)
+            if not in_s and not in_d:
+                in_comment = False
+                segs.append(("".join(seg_buf).strip(), ";"))
+                seg_buf = []
+                unquoted_buf.append(ch)
+            else:
+                seg_buf.append(ch)
+                unquoted_buf.append(" ")
+            i += 1
             continue
+
         if in_comment:
+            i += 1
             continue
+
+        if ch == "\\" and not in_s and i + 1 < n:
+            nxt = raw[i + 1]
+            seg_buf.append(ch)
+            seg_buf.append(nxt)
+            unquoted_buf.append("  " if in_d else nxt)
+            i += 2
+            continue
+
         if ch == "'" and not in_d:
             in_s = not in_s
-        elif ch == '"' and not in_s:
-            in_d = not in_d
-        elif ch == "#" and not in_s and not in_d and (i == 0 or raw[i - 1].isspace()):
-            in_comment = True
+            seg_buf.append(ch)
+            unquoted_buf.append(ch)
+            i += 1
             continue
-        out.append(ch)
-    return "".join(out)
+
+        if ch == '"' and not in_s:
+            in_d = not in_d
+            seg_buf.append(ch)
+            unquoted_buf.append(ch)
+            i += 1
+            continue
+
+        if in_s or in_d:
+            seg_buf.append(ch)
+            unquoted_buf.append(" ")
+            i += 1
+            continue
+
+        if ch == "#" and (i == 0 or raw[i - 1].isspace() or raw[i - 1] in ";|&()"):
+            in_comment = True
+            i += 1
+            continue
+
+        two = raw[i : i + 2]
+        if two in ("&&", "||"):
+            segs.append(("".join(seg_buf).strip(), two))
+            seg_buf = []
+            unquoted_buf.append(two)
+            i += 2
+            continue
+
+        if ch == "&" and ((i > 0 and raw[i - 1] in (">", "|")) or (i + 1 < n and raw[i + 1] == ">")):
+            seg_buf.append(ch)
+            unquoted_buf.append(ch)
+            i += 1
+            continue
+
+        if ch in (";", "|", "&"):
+            segs.append(("".join(seg_buf).strip(), ch))
+            seg_buf = []
+            unquoted_buf.append(ch)
+            i += 1
+            continue
+
+        seg_buf.append(ch)
+        unquoted_buf.append(ch)
+        i += 1
+
+    segs.append(("".join(seg_buf).strip(), ""))
+    return "".join(unquoted_buf), [(s, op) for s, op in segs if s or op]
+
+
+def _strip_shell_comments(raw: str) -> str:
+    _, segs = _scan_shell(raw)
+    return " ; ".join(s for s, _ in segs if s)
 
 
 def _split_shell_segments(raw: str) -> list[tuple[str, str]]:
-    """Split shell command into (segment_text, following_operator) tuples outside quotes."""
-    segs: list[tuple[str, str]] = []
-    buf: list[str] = []
-    in_s = False
-    in_d = False
-    i = 0
-    n = len(raw)
-    while i < n:
-        ch = raw[i]
-        if ch == "'" and not in_d:
-            in_s = not in_s
-            buf.append(ch)
-            i += 1
-        elif ch == '"' and not in_s:
-            in_d = not in_d
-            buf.append(ch)
-            i += 1
-        elif not in_s and not in_d:
-            two = raw[i : i + 2]
-            if two in ("&&", "||"):
-                segs.append(("".join(buf).strip(), two))
-                buf = []
-                i += 2
-            elif ch in (";", "|", "\n", "\r"):
-                segs.append(("".join(buf).strip(), ";" if ch in ("\n", "\r") else ch))
-                buf = []
-                i += 1
-            else:
-                buf.append(ch)
-                i += 1
-        else:
-            buf.append(ch)
-            i += 1
-    segs.append(("".join(buf).strip(), ""))
-    return [(s, op) for s, op in segs if s or op]
+    _, segs = _scan_shell(raw)
+    return segs
+
+
+def _strip_quoted_strings(raw: str) -> str:
+    unquoted, _ = _scan_shell(raw)
+    return unquoted
 
 
 _VERIFY_SEGMENT_RE = re.compile(
@@ -269,7 +319,7 @@ _VERIFY_SEGMENT_RE = re.compile(
     r"(?:(?:uv\s+run|poetry\s+run|npx|&\s*)\s+)?"
     r"(?:"
     r"(?:[^\s;&|]*[/\\])?(?:pytest|verify_all\.ps1)\b|"
-    r"(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+(?:-m\s+(?:pytest|unittest)\b|(?:[^\s;&|]*[/\\])?(?:crucible_gate\.py\s+(?:check|doctor)|test_quality_gate\.py)\b)|"
+    r"(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+(?:-m\s+(?:pytest|unittest)\b|(?:[^\s;&|]*[/\\])?crucible_gate\.py\s+(?:check|doctor)\b)|"
     r"(?:[^\s;&|]*[/\\])?(?:pwsh|powershell)(?:\.exe)?\s+(?:-\S+\s+)*(?:[^\s;&|]*[/\\])?verify_all\.ps1\b|"
     r"(?:npm\s+(?:test|run\s+test)|cargo\s+test|go\s+test)\b"
     r")",
@@ -277,47 +327,26 @@ _VERIFY_SEGMENT_RE = re.compile(
 )
 
 
-def _strip_quoted_strings(raw: str) -> str:
-    """Replace single/double-quoted string interiors with spaces so `>` inside Python/echo strings is not treated as shell redirection."""
-    out: list[str] = []
-    in_s = False
-    in_d = False
-    for ch in raw:
-        if ch == "'" and not in_d:
-            in_s = not in_s
-            out.append(ch)
-        elif ch == '"' and not in_s:
-            in_d = not in_d
-            out.append(ch)
-        elif in_s or in_d:
-            out.append(" ")
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
 def is_mutating_shell_cmd(cmd: str) -> bool:
     """True if shell command performs file mutation/redirection (ignoring `>` inside quotes and harmless redirects)."""
-    uncommented = _strip_shell_comments(cmd)
-    cleaned = _HARMLESS_REDIRECT_RE.sub("", uncommented.lower().replace("\\", "/"))
-    if SHELL_MUTATION_RE.search(_strip_quoted_strings(cleaned)):
+    unquoted, segs = _scan_shell(cmd)
+    cleaned_unquoted = _HARMLESS_REDIRECT_RE.sub("", unquoted.lower().replace("\\", "/"))
+    if SHELL_MUTATION_RE.search(cleaned_unquoted):
         return True
-    # Also check unstripped text for in-process file mutators (`sed -i`, `write_text`, `os.replace`, `open(..., 'w')`)
+    joined_segs = " ; ".join(s for s, _ in segs).lower().replace("\\", "/")
     return bool(
         re.search(
             r"(?i)(?:\bsed\s+-i|\bwrite_text\b|\bwrite_bytes\b|\bos\.(?:replace|rename|unlink|remove)\b|\bshutil\.|"
             r"\bopen\s*\([^)]*,\s*['\"][wa+]|mode\s*=\s*['\"][wa+])",
-            cleaned,
+            joined_segs,
         )
     )
 
 
 def is_crucible_strict_cmd(cmd: str) -> bool:
     """True only when an unquoted shell segment actually invokes `crucible_gate.py check --strict` or `verify_all.ps1`."""
-    raw = _strip_shell_comments(cmd).strip()
-    if not raw:
-        return False
-    for seg, _ in _split_shell_segments(raw):
+    _, segs = _scan_shell(cmd)
+    for seg, _ in segs:
         low = _strip_quoted_strings(seg).lower()
         if re.search(r"(?:^|\s|[/\\])verify_all\.ps1\b", low):
             return True
@@ -327,18 +356,17 @@ def is_crucible_strict_cmd(cmd: str) -> bool:
 
 
 def is_meaningful_verification_command(cmd: Any) -> bool:
-    """RW-13: True for real test/gate commands; False for comments, masked exits, or version/help probes."""
+    """RW-13: True for real test/gate commands; False for comments, masked exits, backgrounded `&`, or version/help probes."""
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    raw = _strip_shell_comments(cmd).strip()
-    if not raw:
+    unquoted, segs = _scan_shell(cmd)
+    if not segs:
         return False
-    # Reject --version / -V / --help / -h case-sensitively so verbose -v (unittest -v, pytest -v) passes
-    if re.search(r"(?:^|\s)(?:--version|-V|--help|-h)(?:\s|$)", raw):
+    # Reject --version / -V / --help / -h only on unquoted tokens
+    if re.search(r"(?:^|\s)(?:--version|-V|--help|-h)(?:\s|$)", unquoted):
         return False
-    segs = _split_shell_segments(raw)
-    # Reject any `||` branch (short-circuit bypass `true || pytest` or failure masking `pytest || echo ok`)
-    if any(op == "||" for _, op in segs):
+    # Reject any `||` or `&` branch (short-circuit/background masking like `pytest & true` or `pytest || echo ok`)
+    if any(op in ("||", "&") for _, op in segs):
         return False
     matched_idx = -1
     for idx, (s, _) in enumerate(segs):
@@ -391,8 +419,7 @@ def check_shell_command(
 
     has_env = bool(ENV_FILE_RE.search(norm_cmd))
     has_gov = any(tok in norm_cmd for tok in GOV_COMMAND_TOKENS)
-    cleaned_for_mut = _HARMLESS_REDIRECT_RE.sub("", norm_cmd)
-    if has_env or (has_gov and (SHELL_MUTATION_RE.search(cleaned_for_mut) or _INLINE_INTERPRETER_RE.search(cleaned_for_mut))):
+    if has_env or (has_gov and (is_mutating_shell_cmd(cmd) or _INLINE_INTERPRETER_RE.search(norm_cmd))):
         if subagent:
             return {"decision": "deny", "reason": "RW-04: Subagents cannot access .env or mutate protected governance/hook files."}
         return {"decision": "force_ask", "reason": "RW-04: Command references .env or mutates protected governance/hook files."}

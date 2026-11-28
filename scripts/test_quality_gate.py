@@ -115,6 +115,8 @@ def _is_tautological_compare(expr: ast.expr) -> bool:
 def _is_tautological_assert_call(call: ast.Call) -> bool:
     cname = _call_name(call)
     tail = cname.split(".")[-1]
+    if tail == "fail":
+        return False
     if tail in ASSERT_METHOD_NAMES and call.args and all(_is_constant_expr(a) for a in call.args):
         return True
     if tail == "assertTrue" and call.args and _is_tautological_compare(call.args[0]):
@@ -173,7 +175,15 @@ def _has_unconditional_skip(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> int |
 
 
 def _strip_comments(source: str) -> str:
-    return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+    import io
+    import tokenize
+
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        kept = [tok for tok in tokens if tok.type != tokenize.COMMENT]
+        return tokenize.untokenize(kept)
+    except (tokenize.TokenError, IndentationError):
+        return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
 
 
 def check_test_source(source: str, filename: str = "test_unknown.py") -> list[TestQualityFinding]:
@@ -338,15 +348,32 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
             )
         )
 
-    # TQ-05: Falsifiability — >=2 tests must include at least one negative/rejection check in an assertion, raises, or test name
+    # TQ-05: Falsifiability — >=2 tests must include at least one negative/rejection check in assertions or raises
     if len(test_funcs) >= 2:
-        neg_parts: list[str] = [fn.name for fn in test_funcs]
+        has_negative = False
+        neg_parts: list[str] = []
         for node in ast.walk(tree):
-            if isinstance(node, (ast.Assert, ast.Call)):
+            if isinstance(node, ast.Assert):
+                t = node.test
+                if isinstance(t, ast.UnaryOp) and isinstance(t.op, ast.Not):
+                    has_negative = True
+                    break
+                if isinstance(t, ast.Compare) and any(isinstance(op, (ast.NotEq, ast.NotIn, ast.IsNot)) for op in t.ops):
+                    has_negative = True
+                    break
+                if isinstance(t, ast.Compare) and any(isinstance(op, ast.Is) for op in t.ops) and any(
+                    isinstance(c, ast.Constant) and c.value in (False, None) for c in t.comparators
+                ):
+                    has_negative = True
+                    break
                 seg = ast.get_source_segment(source, node)
                 if seg:
                     neg_parts.append(seg)
-        if not NEGATIVE_TOKEN_RE.search("\n".join(neg_parts)):
+            elif isinstance(node, ast.Call):
+                seg = ast.get_source_segment(source, node)
+                if seg:
+                    neg_parts.append(seg)
+        if not has_negative and not NEGATIVE_TOKEN_RE.search("\n".join(neg_parts)):
             findings.append(
                 TestQualityFinding(
                     "TQ-05",

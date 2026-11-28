@@ -318,9 +318,7 @@ def _check_script_reachability(config_dir: Path, errors: list[str]) -> list[str]
 def _resolve_gemini_dir(config_dir: Path, gemini_dir: Path | None) -> Path:
     if gemini_dir is not None:
         return gemini_dir.expanduser().resolve()
-    if config_dir.name == "config" and (config_dir.parent / "GEMINI.md").is_file():
-        return config_dir.parent
-    if config_dir.name == "config" and config_dir.parent.name == ".gemini":
+    if (config_dir.parent / "GEMINI.md").is_file() or config_dir.parent.name == ".gemini":
         return config_dir.parent
     return (Path.home() / ".gemini").resolve()
 
@@ -357,6 +355,29 @@ def run_doctor(
             pol_obj = json.loads(pol_path.read_text(encoding="utf-8"))
             if not isinstance(pol_obj, dict):
                 errors.append("policy.json: must be a JSON object")
+            else:
+                hygiene = pol_obj.get("deliverable_hygiene")
+                if hygiene is not None and not isinstance(hygiene, list):
+                    errors.append("policy.json: deliverable_hygiene must be a list")
+                for p_idx, prof in enumerate(hygiene if isinstance(hygiene, list) else []):
+                    if not isinstance(prof, dict):
+                        errors.append(f"policy.json: deliverable_hygiene[{p_idx}] must be an object")
+                        continue
+                    cp = prof.get("context_pattern")
+                    if cp:
+                        try:
+                            re.compile(str(cp))
+                        except re.error as exc:
+                            errors.append(f"policy.json: invalid context_pattern in deliverable_hygiene[{p_idx}]: {exc}")
+                    rules = prof.get("rules")
+                    if rules is not None and not isinstance(rules, list):
+                        errors.append(f"policy.json: deliverable_hygiene[{p_idx}].rules must be a list")
+                    for r_idx, rule in enumerate(rules if isinstance(rules, list) else []):
+                        if isinstance(rule, dict) and rule.get("pattern"):
+                            try:
+                                re.compile(str(rule["pattern"]))
+                            except re.error as exc:
+                                errors.append(f"policy.json: invalid regex in deliverable_hygiene[{p_idx}].rules[{r_idx}]: {exc}")
         except (OSError, ValueError) as exc:
             errors.append(f"Invalid JSON in policy.json: {exc}")
 
