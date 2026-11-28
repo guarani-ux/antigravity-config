@@ -9,6 +9,8 @@
 ## How the User Prompts (The Probing Method)
 - The user thinks exploratorily out loud by proposing a rough solution, metaphor, or surface symptom (e.g., *"add a hook for X"*, *"build a system that does Y"*).
 - **Those prompts are probes into an underlying condition, NOT literal build orders.**
+- **Never mirror brainstorms with brainstorms:** Respond with grounded diagnosis and a concrete path—not speculative riffs or open option menus.
+- **Never stay confined to the level pointed to:** The user points at the symptom or layer visible from their side. Inspect *above, below, and across* the whole system (architecture, runtime, adjacent layers) to solve at the true root level, and resolve any remaining gaps rather than ending on caveats.
 - Before mutating files or building infrastructure, use reasoning tokens to unpack:
   1. *What underlying friction or weakness is driving this probe?*
   2. *What does the way it is framed reveal about a deeper structural condition?*
