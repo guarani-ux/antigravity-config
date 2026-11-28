@@ -47,8 +47,8 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
             r"(?:[\w./-]+\s+){0,2}(?:[\w./-]+-)?(?:skill|validator|harness|pipeline|engine|module|cli|hook|workflow|system|script|config))\b",
             re.IGNORECASE,
         ),
-        "SIGNAL [potential-unleashed]: Load potential-unleashed. Own the outcome, reshape/cut before patching, "
-        "prove red-to-green through the real doorway (including the absent case), and blind-break structural changes.",
+        "SIGNAL [potential-unleashed]: Load potential-unleashed. Deconstruct exploratory probes and domain invariants first, "
+        "reshape/cut before patching, verify load-bearing runtime integration, and run 1 unified blind verification pass on structural changes.",
     ),
 )
 
@@ -202,18 +202,47 @@ def detect_prompt_signals(user_text: str) -> list[str]:
     return messages
 
 
+_CORE_FILES = ("IDENTITY.md", "PRINCIPLES.md", "EPISODES.md")
+
+
+def _cognitive_core_session_note(core_dir: Path | None = None) -> str | None:
+    target_dir = core_dir if core_dir is not None else (Path(__file__).resolve().parent.parent / "core")
+    if not target_dir.is_dir():
+        return None
+    present = [f for f in _CORE_FILES if (target_dir / f).is_file()]
+    if not present:
+        return None
+    total_lines = 0
+    readable: list[str] = []
+    for f in present:
+        try:
+            total_lines += len((target_dir / f).read_text(encoding="utf-8", errors="replace").splitlines())
+            readable.append(f)
+        except OSError as exc:
+            print(f"operator_router core read error ({f}): {type(exc).__name__}", file=sys.stderr)
+    if not readable:
+        return None
+    return (
+        f"COGNITIVE CORE READY ({total_lines} lines across {', '.join(readable)} in {target_dir.as_posix()}): "
+        "Treat exploratory user ideas/metaphors as probes before coding; read core/ when framing structural work or consolidating lessons."
+    )
+
+
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
-    """Emit minimal startup orientation and surface any fresh pending NEXT_SESSION_HANDOFF.md."""
+    """Emit minimal startup orientation, Cognitive Core pointer, and pending NEXT_SESSION_HANDOFF.md status."""
     steps: list[dict[str, Any]] = [
         {
             "systemMessage": {
                 "systemMessage": (
                     "Global constitution active (5 Sentinel/Router hooks live; "
-                    "potential-unleashed for engineering/debugging, meeting-brief for transcripts)."
+                    "plainspoken-partner for probing/sense-making, potential-unleashed for engineering/verification, meeting-brief for transcripts)."
                 )
             }
         }
     ]
+    core_note = _cognitive_core_session_note()
+    if core_note:
+        steps.append({"systemMessage": {"systemMessage": core_note}})
     handoff = Path.home() / ".gemini" / "NEXT_SESSION_HANDOFF.md"
     if handoff.is_file():
         try:
@@ -283,7 +312,8 @@ def handle_pre_invocation(payload: dict[str, Any]) -> dict[str, Any]:
 
     if should_emit_ctx and ctx_status == "DEPLETED":
         nudges.append(
-            f"CONTEXT WINDOW DEPLETED ({ctx['reason']}): Keep this reply concise and recommend starting a fresh conversation (or /compact)."
+            f"CONTEXT WINDOW DEPLETED ({ctx['reason']}): Keep this reply concise, consolidate any durable lessons into core/ (or Working_Context.md), "
+            "write ~/.gemini/NEXT_SESSION_HANDOFF.md if work continues, and recommend starting a fresh conversation (or /compact)."
         )
     elif should_emit_ctx and ctx_status == "WARN":
         nudges.append(

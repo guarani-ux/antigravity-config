@@ -14,12 +14,9 @@ CODE_EXTS = (
 
 DOMAIN_DIRS = ("calgary public library", "personal work", "graphs")
 
-HARD_PROTECTED_BASENAMES = {
-    "sentinel-state.json",
-    "sentinel-state.lock",
-    "operator-router-seen.json",
-    "hook-events.jsonl",
-    "reliability-events.jsonl",
+from .state import STATE_PROTECTED_BASENAMES
+
+HARD_PROTECTED_BASENAMES = set(STATE_PROTECTED_BASENAMES) | {
     "hooks.json",
     "hooks.json.portable",
     "policy.json",

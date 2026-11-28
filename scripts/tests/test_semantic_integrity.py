@@ -585,6 +585,106 @@ class TestSemanticIntegrity(unittest.TestCase):
             )
             self.assertTrue(load_state(base).corrupt)
 
+    def test_v2_cognitive_core_budget_and_seam_closures(self) -> None:
+        """Verify 2.0 core/ budget & missing checks, RW-20 exclusion, SessionStart absent/corrupt handling, CTX_DEPLETED handoff producer, and fresh-only stop() last_evidence."""
+        import json
+
+        import doctor
+        import operator_router
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            art = Path(tmp) / "art"
+            (root / ".git").mkdir(parents=True)
+            art.mkdir(parents=True)
+            base = {"workspacePaths": [str(root)], "artifactDirectoryPath": str(art)}
+
+            # 1. SessionStart core/ note: live core/ surfaces note, absent core/ returns None, non-UTF-8 bytes don't crash
+            start_out = operator_router.handle_session_start({"workspacePaths": [str(root)]})
+            self.assertTrue(
+                any("COGNITIVE CORE READY" in s["systemMessage"]["systemMessage"] for s in start_out["injectSteps"]),
+                start_out,
+            )
+            self.assertIsNone(operator_router._cognitive_core_session_note(Path(tmp) / "no_core"))
+            bad_utf8_core = Path(tmp) / "bad_core"
+            bad_utf8_core.mkdir()
+            (bad_utf8_core / "IDENTITY.md").write_bytes(b"header\n\xff\xfeinvalid\n")
+            bad_note = operator_router._cognitive_core_session_note(bad_utf8_core)
+            self.assertIsNotNone(bad_note)
+            self.assertIn("IDENTITY.md", str(bad_note))
+
+            # 2. CTX_DEPLETED emits NEXT_SESSION_HANDOFF.md producer guidance
+            log_dir = art / ".system_generated" / "logs"
+            log_dir.mkdir(parents=True)
+            tp = log_dir / "transcript.jsonl"
+            tp.write_text((json.dumps({"type": "CHECKPOINT"}) + "\n") * 4, encoding="utf-8")
+            dep_out = operator_router.handle_pre_invocation(
+                {"conversationId": "conv-dep", "artifactDirectoryPath": str(art), "lastUserInput": "status"}
+            )
+            dep_blob = json.dumps(dep_out)
+            self.assertIn("CONTEXT WINDOW DEPLETED", dep_blob)
+            self.assertIn("NEXT_SESSION_HANDOFF.md", dep_blob)
+
+            # 3. Editing core/IDENTITY.md mentioning Calgary Public Library + em-dash MUST NOT trigger RW-20
+            sentinel.post({**base, "toolCall": {"name": "read_file", "args": {"Path": str(root / "README.md")}}})
+            id_file = root / "core" / "IDENTITY.md"
+            id_file.parent.mkdir(parents=True)
+            id_res = sentinel.pre(
+                {
+                    **base,
+                    "toolCall": {
+                        "name": "write_file",
+                        "args": {
+                            "Path": str(id_file),
+                            "Content": "# Identity\nCalgary Public Library — applied domain, not core mission.\n",
+                        },
+                    },
+                }
+            )
+            self.assertEqual(id_res["decision"], "allow", id_res)
+
+            # 4. stop() surfaces fresh last_evidence detail, and suppresses stale detail after a subsequent re-edit
+            mod = root / "mod.py"
+            mod.write_text("X = 1\n", encoding="utf-8")
+            sentinel.post({**base, "toolCall": {"name": "write_file", "args": {"Path": str(mod), "Content": "X = 2\n"}}})
+            sentinel.post(
+                {
+                    **base,
+                    "toolResult": {"exitCode": 0, "stdout": "collected 3 items\n"},
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest --collect-only"}},
+                }
+            )
+            stop_fresh = sentinel.stop({**base, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0})
+            self.assertEqual(stop_fresh["decision"], "continue")
+            self.assertIn("dry_run_flag", stop_fresh["reason"])
+
+            # Subsequent code edit invalidates the old dry_run_flag attribution
+            mod.write_text("X = 3\n", encoding="utf-8")
+            sentinel.post({**base, "toolCall": {"name": "write_file", "args": {"Path": str(mod), "Content": "X = 3\n"}}})
+            stop_stale = sentinel.stop({**base, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0})
+            self.assertEqual(stop_stale["decision"], "continue")
+            self.assertNotIn("dry_run_flag", stop_stale["reason"])
+
+            # 5. doctor.py enforces missing core/, hard cap <= 200 across all core/*.md, and clean control
+            cfg_missing = Path(tmp) / "cfg_missing"
+            cfg_missing.mkdir()
+            rep_missing = doctor.run_doctor(cfg_missing)
+            self.assertTrue(any("Missing Cognitive Core directory" in e for e in rep_missing["errors"]))
+
+            cfg_ok = Path(tmp) / "cfg_ok"
+            (cfg_ok / "core").mkdir(parents=True)
+            for fn in ("IDENTITY.md", "PRINCIPLES.md", "EPISODES.md"):
+                (cfg_ok / "core" / fn).write_text("line\n" * 20, encoding="utf-8")
+            rep_ok = doctor.run_doctor(cfg_ok)
+            self.assertEqual(rep_ok["core"]["total_lines"], 60)
+            self.assertFalse(any("hard cap <= 200" in e for e in rep_ok["errors"]))
+
+            # Extra 4th core/*.md pushing total over 200 MUST be caught as an error
+            (cfg_ok / "core" / "EXTRA.md").write_text("line\n" * 150, encoding="utf-8")
+            rep_over = doctor.run_doctor(cfg_ok)
+            self.assertEqual(rep_over["core"]["total_lines"], 210)
+            self.assertTrue(any("hard cap <= 200" in e for e in rep_over["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()

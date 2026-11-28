@@ -501,7 +501,30 @@ def run_doctor(
     # 4. Skills hygiene & broken local references
     skills = _check_skills(config_dir, errors, warnings)
 
-    # 5. Telemetry summary
+    # 5. Cognitive Core (core/) hard consolidation budget check (<= 200 lines across all core/*.md)
+    core_dir = config_dir / "core"
+    core_report: dict[str, Any] = {"exists": False, "total_lines": 0, "files": {}}
+    if not core_dir.is_dir():
+        errors.append("Missing Cognitive Core directory: core/")
+    else:
+        core_report["exists"] = True
+        total_core_lines = 0
+        required_core = ("IDENTITY.md", "PRINCIPLES.md", "EPISODES.md")
+        for fname in required_core:
+            if not (core_dir / fname).is_file():
+                errors.append(f"Cognitive Core missing required file: core/{fname}")
+        for fp in sorted(core_dir.glob("*.md")):
+            try:
+                cnt = len(fp.read_text(encoding="utf-8").splitlines())
+                core_report["files"][fp.name] = cnt
+                total_core_lines += cnt
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"Cognitive Core unreadable file core/{fp.name}: {type(exc).__name__}")
+        core_report["total_lines"] = total_core_lines
+        if total_core_lines > 200:
+            errors.append(f"Cognitive Core (core/) has {total_core_lines} lines (hard cap <= 200); consolidate and prune old entries")
+
+    # 6. Telemetry summary
     telemetry = summarize_telemetry(telemetry_path)
 
     return {
@@ -511,6 +534,7 @@ def run_doctor(
         "python_files_checked": py_count,
         "unreachable_scripts": dead_scripts,
         "skills": skills,
+        "core": core_report,
         "telemetry": telemetry,
         "errors": errors,
         "warnings": warnings,
@@ -540,6 +564,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Machine Doctor: {status} (Python {report['python_version']}, {report['python_files_checked']} scripts, {len(report['skills'])} skills)")
         for s in report["skills"]:
             print(f"  - skill: {s['name']} ({s['lines']} lines)")
+        core = report.get("core") or {}
+        if core.get("exists"):
+            print(f"  - core: {core['total_lines']}/200 lines ({', '.join(f'{k}={v}' for k, v in core['files'].items())})")
         tel = report["telemetry"]
         if tel["exists"]:
             print(f"  - telemetry: {tel['events']} events, p50={tel['p50_ms']}ms, p95={tel['p95_ms']}ms, top_blocks={tel['top_blocks']}")

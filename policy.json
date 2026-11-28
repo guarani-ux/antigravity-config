@@ -9,7 +9,7 @@
       "name": "calgary-public-library",
       "file_extensions": [".md", ".txt"],
       "context_pattern": "(?i)calgary\\s+public\\s+library|calgary-library-production|series_pitch|production_brief|concept_outline|av_script|call_sheet|shot_list",
-      "exclude_basenames": ["SKILL.md", "README.md", "AGENTS.md", "GEMINI.md", "GEMINI.global.md", "Working_Context.md"],
+      "exclude_basenames": ["SKILL.md", "README.md", "AGENTS.md", "GEMINI.md", "GEMINI.global.md", "Working_Context.md", "IDENTITY.md", "PRINCIPLES.md", "EPISODES.md"],
       "rules": [
         {
           "pattern": "\\bCPL\\b",

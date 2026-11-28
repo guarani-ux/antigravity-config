@@ -729,6 +729,12 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
         return {"decision": "continue", "reason": "External acceptance check failed: " + "; ".join(problems[:6])}
 
     if st.has_open_obligations:
+        ev_note = ""
+        if st.last_evidence is not None and not st.last_evidence.discharged and st.last_evidence.detail:
+            tracked = set(st.obligations) | set(st.verified_files)
+            cur_digest = compute_state_digest(st.mutation_epoch, {p: file_digest(p) for p in tracked}, st.shell_dirty)
+            if st.last_evidence.state_digest == cur_digest:
+                ev_note = f" (last verification did not discharge: {st.last_evidence.outcome}/{st.last_evidence.detail})"
         if drifted:
             names = ", ".join(os.path.basename(p) for p in sorted(drifted)[:4])
             return {
@@ -739,11 +745,11 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
             names = ", ".join(os.path.basename(p) for p in sorted(st.obligations)[:4])
             return {
                 "decision": "continue",
-                "reason": f"LIFECYCLE (Verify-Before-Stop): Workspace code ({names}) was modified without a passing verification command covering it. Run tests before finishing.",
+                "reason": f"LIFECYCLE (Verify-Before-Stop): Workspace code ({names}) was modified without a passing verification command covering it{ev_note}. Run tests before finishing.",
             }
         return {
             "decision": "continue",
-            "reason": "LIFECYCLE (Verify-Before-Stop): Workspace code was modified without a passing verification command afterward. Run tests before finishing.",
+            "reason": f"LIFECYCLE (Verify-Before-Stop): Workspace code was modified without a passing verification command afterward{ev_note}. Run tests before finishing.",
         }
 
     if st.edited_domain_dirs:
