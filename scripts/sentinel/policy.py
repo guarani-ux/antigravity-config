@@ -85,9 +85,12 @@ _INLINE_INTERPRETER_RE = re.compile(
 )
 
 GOV_COMMAND_TOKENS = (
+    ".git",
     ".agents/hooks.json",
     ".agents/acceptance.lock.json",
     ".gemini/config/hooks.json",
+    "hooks.json.portable",
+    "hooks.json",
     "policy.json",
     "sentinel.py",
     "operator_router.py",
@@ -274,6 +277,55 @@ _VERIFY_SEGMENT_RE = re.compile(
 )
 
 
+def _strip_quoted_strings(raw: str) -> str:
+    """Replace single/double-quoted string interiors with spaces so `>` inside Python/echo strings is not treated as shell redirection."""
+    out: list[str] = []
+    in_s = False
+    in_d = False
+    for ch in raw:
+        if ch == "'" and not in_d:
+            in_s = not in_s
+            out.append(ch)
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+            out.append(ch)
+        elif in_s or in_d:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def is_mutating_shell_cmd(cmd: str) -> bool:
+    """True if shell command performs file mutation/redirection (ignoring `>` inside quotes and harmless redirects)."""
+    uncommented = _strip_shell_comments(cmd)
+    cleaned = _HARMLESS_REDIRECT_RE.sub("", uncommented.lower().replace("\\", "/"))
+    if SHELL_MUTATION_RE.search(_strip_quoted_strings(cleaned)):
+        return True
+    # Also check unstripped text for in-process file mutators (`sed -i`, `write_text`, `os.replace`, `open(..., 'w')`)
+    return bool(
+        re.search(
+            r"(?i)(?:\bsed\s+-i|\bwrite_text\b|\bwrite_bytes\b|\bos\.(?:replace|rename|unlink|remove)\b|\bshutil\.|"
+            r"\bopen\s*\([^)]*,\s*['\"][wa+]|mode\s*=\s*['\"][wa+])",
+            cleaned,
+        )
+    )
+
+
+def is_crucible_strict_cmd(cmd: str) -> bool:
+    """True only when an unquoted shell segment actually invokes `crucible_gate.py check --strict` or `verify_all.ps1`."""
+    raw = _strip_shell_comments(cmd).strip()
+    if not raw:
+        return False
+    for seg, _ in _split_shell_segments(raw):
+        low = _strip_quoted_strings(seg).lower()
+        if re.search(r"(?:^|\s|[/\\])verify_all\.ps1\b", low):
+            return True
+        if re.search(r"crucible_gate\.py\s+check\b", low) and "--strict" in low:
+            return True
+    return False
+
+
 def is_meaningful_verification_command(cmd: Any) -> bool:
     """RW-13: True for real test/gate commands; False for comments, masked exits, or version/help probes."""
     if not isinstance(cmd, str) or not cmd.strip():
@@ -294,9 +346,9 @@ def is_meaningful_verification_command(cmd: Any) -> bool:
             matched_idx = idx
     if matched_idx < 0:
         return False
-    # Reject trailing `;` after the verification command (masks non-zero exit code via `pytest; true`)
+    # Reject trailing `;` or `|` after the verification command (masks non-zero exit code via `pytest; true` or `pytest | true`)
     for idx in range(matched_idx, len(segs) - 1):
-        if segs[idx][1] == ";":
+        if segs[idx][1] in (";", "|"):
             return False
     return True
 

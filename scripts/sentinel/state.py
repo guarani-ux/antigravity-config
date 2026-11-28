@@ -21,6 +21,7 @@ class SentinelState:
     edited_since_last_fail: bool = False
     edited_code_files: list[str] = field(default_factory=list)
     edited_domain_dirs: list[str] = field(default_factory=list)
+    corrupt: bool = False
 
 
 def state_path(payload: dict[str, Any]) -> Path | None:
@@ -40,7 +41,7 @@ def load_state(payload: dict[str, Any]) -> SentinelState:
     try:
         raw = json.loads(sp.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            return SentinelState()
+            return SentinelState(corrupt=True)
         return SentinelState(
             oriented=bool(raw.get("oriented", False)),
             repair_strikes=int(raw.get("repair_strikes", 0)),
@@ -49,10 +50,11 @@ def load_state(payload: dict[str, Any]) -> SentinelState:
             edited_since_last_fail=bool(raw.get("edited_since_last_fail", False)),
             edited_code_files=[str(x) for x in (raw.get("edited_code_files") or []) if isinstance(x, str)],
             edited_domain_dirs=[str(x) for x in (raw.get("edited_domain_dirs") or []) if isinstance(x, str)],
+            corrupt=bool(raw.get("corrupt", False)),
         )
     except (OSError, ValueError, TypeError) as exc:
         print(f"sentinel state load error: {type(exc).__name__}", file=sys.stderr)
-        return SentinelState()
+        return SentinelState(corrupt=True)
 
 
 def save_state(payload: dict[str, Any], state: SentinelState) -> None:

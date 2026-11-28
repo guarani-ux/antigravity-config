@@ -13,15 +13,15 @@ from typing import Any
 
 from .ast_gate import check_write_integrity
 from .policy import (
-    SHELL_MUTATION_RE,
-    _HARMLESS_REDIRECT_RE,
     _strip_shell_comments,
     check_mcp_call,
     check_shell_command,
     domain_bucket,
     effective_roots,
     is_code_file,
+    is_crucible_strict_cmd,
     is_meaningful_verification_command,
+    is_mutating_shell_cmd,
     is_protected_path,
     is_subagent,
     is_test_file,
@@ -123,8 +123,7 @@ def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
 
 
 def _is_mutating_shell_cmd(cmd: str) -> bool:
-    cleaned = _HARMLESS_REDIRECT_RE.sub("", cmd.lower().replace("\\", "/"))
-    return bool(SHELL_MUTATION_RE.search(cleaned))
+    return is_mutating_shell_cmd(cmd)
 
 
 def pre(payload: dict[str, Any]) -> dict[str, str]:
@@ -267,9 +266,10 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
     art_dir = _extract_artifact_dir(payload)
 
     if name in READ_TOOLS and not failed:
-        st.oriented = True
-        if st.repair_strikes >= 3:
-            st.repair_strikes = 2
+        if not is_subagent(payload):
+            st.oriented = True
+            if st.repair_strikes >= 3:
+                st.repair_strikes = 2
     elif name in MUTATE_FILE_TOOLS and not failed:
         res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir, cwd=_extract_cwd(payload, args))
         if res is not None:
@@ -285,7 +285,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                 if dom and dom not in st.edited_domain_dirs:
                     st.edited_domain_dirs.append(dom)
     elif name in SHELL_TOOLS:
-        if not failed:
+        if not failed and not is_subagent(payload):
             st.oriented = True
         cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
         if is_meaningful_verification_command(cmd):
@@ -298,8 +298,8 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                 st.unverified_code_edits = False
                 st.edited_since_last_fail = False
                 st.edited_code_files = []
-                uncommented = _strip_shell_comments(cmd).lower()
-                if "crucible_gate.py" in uncommented or "verify_all.ps1" in uncommented:
+                st.corrupt = False
+                if is_crucible_strict_cmd(cmd):
                     st.edited_domain_dirs = []
         elif not failed and _is_mutating_shell_cmd(cmd):
             st.unverified_code_edits = True
@@ -369,6 +369,11 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
 
     roots = effective_roots(payload.get("workspacePaths") or [])
     st = load_state(payload)
+    if st.corrupt:
+        return {
+            "decision": "continue",
+            "reason": "LIFECYCLE (State Integrity): sentinel-state.json is corrupt; verify workspace tests before stopping.",
+        }
     problems = _check_acceptance_and_edited_py(roots, st.edited_code_files)
     if problems:
         return {"decision": "continue", "reason": "External acceptance check failed: " + "; ".join(problems[:6])}

@@ -103,6 +103,9 @@ def _is_tautological_compare(expr: ast.expr) -> bool:
         return bool(expr.value) is True
     if _is_constant_expr(expr):
         return True
+    if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.Or):
+        if any(isinstance(v, ast.Constant) and bool(v.value) is True for v in expr.values):
+            return True
     if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and len(expr.comparators) == 1:
         if isinstance(expr.ops[0], (ast.Eq, ast.Is)):
             return ast.dump(expr.left) == ast.dump(expr.comparators[0])
@@ -113,6 +116,8 @@ def _is_tautological_assert_call(call: ast.Call) -> bool:
     cname = _call_name(call)
     tail = cname.split(".")[-1]
     if tail in ASSERT_METHOD_NAMES and call.args and all(_is_constant_expr(a) for a in call.args):
+        return True
+    if tail == "assertTrue" and call.args and _is_tautological_compare(call.args[0]):
         return True
     if cname.endswith(("assertEqual", "assertIs")) and len(call.args) >= 2:
         return ast.dump(call.args[0]) == ast.dump(call.args[1])
@@ -318,6 +323,11 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
         re.search(r"end-to-end|integration", (ast.get_docstring(tree) or ""), re.IGNORECASE)
     )
     uses_mock = bool(re.search(r"\b(?:unittest\.mock|MagicMock|monkeypatch\.setattr)\b", code_only))
+    if not uses_mock:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "unittest" and any(a.name == "mock" for a in node.names):
+                uses_mock = True
+                break
     if claims_e2e and uses_mock:
         findings.append(
             TestQualityFinding(
@@ -328,16 +338,23 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
             )
         )
 
-    # TQ-05: Falsifiability — >=2 tests must include at least one negative/rejection check
-    if len(test_funcs) >= 2 and not NEGATIVE_TOKEN_RE.search(code_only):
-        findings.append(
-            TestQualityFinding(
-                "TQ-05",
-                filename,
-                1,
-                "Test suite only exercises positive/happy paths; add at least one negative/rejection/failure-path test.",
+    # TQ-05: Falsifiability — >=2 tests must include at least one negative/rejection check in an assertion, raises, or test name
+    if len(test_funcs) >= 2:
+        neg_parts: list[str] = [fn.name for fn in test_funcs]
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assert, ast.Call)):
+                seg = ast.get_source_segment(source, node)
+                if seg:
+                    neg_parts.append(seg)
+        if not NEGATIVE_TOKEN_RE.search("\n".join(neg_parts)):
+            findings.append(
+                TestQualityFinding(
+                    "TQ-05",
+                    filename,
+                    1,
+                    "Test suite only exercises positive/happy paths; add at least one negative/rejection/failure-path test.",
+                )
             )
-        )
 
     return findings
 

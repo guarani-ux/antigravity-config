@@ -62,7 +62,10 @@ BUG_SIGNAL_RE = re.compile(
 SPEC_DOC_RE = re.compile(
     r"(?im)^\s*(?:WORKFLOW\s+\d+|#\s*PHASE\s+\d+|##\s*Final Execution Prompt|TARGET REPOSITORY:)"
 )
-TRACE_RE = re.compile(r"\b(?:traceback|stack trace)\b", re.IGNORECASE)
+TRACE_RE = re.compile(
+    r"\b(?:traceback|stack trace|assertionerror|typeerror|valueerror|keyerror|runtimeerror|failing tests?)\b",
+    re.IGNORECASE,
+)
 
 # Mechanical context-window pressure thresholds on transcript.jsonl (post-compaction aware)
 CTX_WARN_KB = 350.0
