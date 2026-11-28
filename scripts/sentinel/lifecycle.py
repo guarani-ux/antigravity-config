@@ -13,40 +13,66 @@ from typing import Any
 
 from .ast_gate import check_write_integrity
 from .policy import (
-    _strip_shell_comments,
+    VerificationCmd,
     check_mcp_call,
     check_shell_command,
+    classify_verification_command,
     domain_bucket,
     effective_roots,
     is_code_file,
     is_code_mutating_shell_cmd,
-    is_crucible_strict_cmd,
-    is_meaningful_verification_command,
     is_mutating_shell_cmd,
     is_protected_path,
     is_subagent,
     is_test_file,
+    load_user_policy,
     resolve_target,
 )
-from .state import STATE_FILENAME, load_state, save_state, state_path
+from .state import (
+    STATE_PROTECTED_BASENAMES,
+    EvidenceRecord,
+    SentinelState,
+    compute_state_digest,
+    file_digest,
+    load_state,
+    state_path,
+    update_state,
+)
 
 READ_TOOLS = ("read_file", "view_file")
 WRITE_TOOLS = ("write_file", "write_to_file")
 EDIT_TOOLS = ("edit_file", "replace_file_content", "multi_replace_file_content")
 MUTATE_FILE_TOOLS = WRITE_TOOLS + EDIT_TOOLS
 SHELL_TOOLS = ("run_command", "command")
-VACUOUS_TEST_OUTPUT_RE = re.compile(
-    r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b|\b[1-9]\d*\s+skipped\b)"
-)
-FAILED_TEST_OUTPUT_RE = re.compile(
-    r"(?:\b[1-9]\d*\s+(?:failed|errors?)\b|\bFAILED\s*\(|^ERROR:\s+\S+\s+\(|^FAIL\t)",
+
+_OUTPUT_FAILURE_RE = re.compile(
+    r"(?:\b[1-9]\d*\s+(?:failed|errors?|failing)\b"
+    r"|^FAIL:\s+\S+\s+\("
+    r"|^ERROR:\s+\S+\s+\("
+    r"|\bFAILED\s*\("
+    r"|\bunexpected\s+successes\s*=\s*[1-9]\d*"
+    r"|^FAILED\s+\S+::\S+"
+    r"|\bERROR\s+collecting\b"
+    r"|\bInterrupted:\s+[1-9]\d*\s+errors?\b"
+    r"|^FAIL\t"
+    r"|^---\s+FAIL:"
+    r"|^test result:\s+FAILED\.)",
     re.MULTILINE,
 )
-NONZERO_TEST_OUTPUT_RE = re.compile(
-    r"(?i)(?:\b[1-9]\d*\s+(?:passed|passing)\b|\bran\s+[1-9]\d*\s+tests?\b)"
+_GATE_FAILURE_RE = re.compile(r"(?:\bCUSTODY_FAIL\b|Traceback \(most recent call last\)|\bFAILED\s*\()")
+_PASSED_COUNT_RE = re.compile(r"(?im)(?:\b(\d+)\s+(?:passed|passing)\b|^#\s+pass\s+(\d+)\b)")
+_UNITTEST_OK_RE = re.compile(r"(?is)\bran\s+(\d+)\s+tests?\b.*?\bok(?:\s*\(([^)]*)\))?")
+_GO_VERBOSE_PASS_RE = re.compile(r"(?m)^---\s+PASS:")
+_GO_OK_PKG_RE = re.compile(r"(?m)^ok\s+\S+(?!.*\[no test(?:s to run| files)\])")
+_GO_NO_TESTS_WARN_RE = re.compile(r"(?i)testing:\s+warning:\s+no\s+tests\s+to\s+run")
+_VACUOUS_DETAIL_RE = re.compile(
+    r"(?i)(?:\bran\s+0\s+tests?\b|\bcollected\s+\d+\s+items?\b|\bno\s+tests?\s+ran\b|\b0\s+passed\b|"
+    r"\b\d+\s+(?:skipped|xfailed|deselected)\b|\[no test(?:s to run| files)\]|testing:\s+warning:\s+no\s+tests\s+to\s+run)"
 )
-UNITTEST_SKIPPED_RE = re.compile(
-    r"(?is)\bran\s+([1-9]\d*)\s+tests?\b.*\bok\s*\(\s*skipped\s*=\s*(\d+)\s*\)"
+_GENERIC_STEMS = frozenset({"__init__"})
+_GENERIC_PKG_DIRS = frozenset({"src", "lib", "app", "scripts", "pkg", "internal", "cmd", "repo", "tests", "test"})
+_TEST_TIER_DIRS = frozenset(
+    {"tests", "test", "unit", "integration", "e2e", "functional", "unit_tests", "integration_tests", "specs", "spec"}
 )
 
 
@@ -77,7 +103,23 @@ def _extract_artifact_dir(payload: dict[str, Any]) -> str | None:
     return art.strip() if isinstance(art, str) and art.strip() else None
 
 
+def _extract_exit_code(payload: dict[str, Any]) -> int | None:
+    for container in (payload, payload.get("toolResult"), payload.get("result")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("exitCode", "exit_code", "returncode"):
+            val = container.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val
+            if isinstance(val, str) and val.strip().lstrip("+-").isdigit():
+                return int(val.strip())
+    return None
+
+
 def _is_tool_failed(payload: dict[str, Any]) -> bool:
+    ec = _extract_exit_code(payload)
+    if ec is not None and ec != 0:
+        return True
     for container in (payload, payload.get("toolResult"), payload.get("result")):
         if not isinstance(container, dict):
             continue
@@ -88,43 +130,271 @@ def _is_tool_failed(payload: dict[str, Any]) -> bool:
         status = container.get("status")
         if isinstance(status, str) and status.strip().lower() in ("error", "failed", "failure"):
             return True
-        for key in ("exitCode", "exit_code", "returncode"):
-            val = container.get(key)
-            if isinstance(val, int) and not isinstance(val, bool) and val != 0:
-                return True
-            if isinstance(val, str) and val.strip().lstrip("+-").isdigit() and int(val.strip()) != 0:
-                return True
     return False
 
 
-def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
-    """Return True if captured command output explicitly shows failures, 0 tests executed, or all tests skipped."""
+def _extract_output_channel(payload: dict[str, Any]) -> tuple[str, str]:
+    """Return (channel='captured'|'absent', combined_output_text)."""
     chunks: list[str] = []
+    captured = False
     for container in (payload, payload.get("toolResult"), payload.get("result")):
-        if isinstance(container, str) and container.strip():
+        if isinstance(container, str):
+            captured = True
             chunks.append(container)
             continue
         if not isinstance(container, dict):
             continue
         for key in ("stdout", "stderr", "output", "text", "content"):
             val = container.get(key)
-            if isinstance(val, str) and val.strip():
+            if isinstance(val, str):
+                captured = True
                 chunks.append(val)
-    if not chunks:
-        return False
-    combined = "\n".join(chunks)
-    if FAILED_TEST_OUTPUT_RE.search(combined):
-        return True
-    m_unit = UNITTEST_SKIPPED_RE.search(combined)
-    if m_unit and int(m_unit.group(2)) >= int(m_unit.group(1)):
-        return True
-    if NONZERO_TEST_OUTPUT_RE.search(combined):
-        return False
-    return bool(VACUOUS_TEST_OUTPUT_RE.search(combined))
+    return ("captured" if captured else "absent"), "\n".join(chunks)
 
 
-def _is_mutating_shell_cmd(cmd: str) -> bool:
-    return is_mutating_shell_cmd(cmd)
+def _count_effective_passes(runner: str, combined: str) -> int:
+    if runner == "unittest":
+        matches = list(_UNITTEST_OK_RE.finditer(combined))
+        if matches:
+            total = 0
+            for m in matches:
+                ran = int(m.group(1))
+                meta = m.group(2) or ""
+                m_skip = re.search(r"skipped\s*=\s*(\d+)", meta, re.IGNORECASE)
+                m_xfail = re.search(r"expected\s+failures\s*=\s*(\d+)", meta, re.IGNORECASE)
+                skipped = int(m_skip.group(1)) if m_skip else 0
+                xfailed = int(m_xfail.group(1)) if m_xfail else 0
+                total += max(0, ran - skipped - xfailed)
+            return total
+    if runner == "go":
+        verbose_passes = len(_GO_VERBOSE_PASS_RE.findall(combined))
+        if verbose_passes > 0:
+            return verbose_passes
+        ok_pkgs = len(_GO_OK_PKG_RE.findall(combined))
+        empty_warns = len(_GO_NO_TESTS_WARN_RE.findall(combined))
+        return max(0, ok_pkgs - empty_warns)
+    return sum(int(m.group(1) or m.group(2)) for m in _PASSED_COUNT_RE.finditer(combined))
+
+
+def _resolve_test_target_path(target: str, roots: list[str], cwd: str | None) -> str | None:
+    clean = target.split("::", 1)[0].strip()
+    if not clean:
+        return None
+    candidates: list[Path] = []
+    p = Path(clean)
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        if cwd:
+            candidates.append(Path(cwd) / clean)
+        for r in roots:
+            candidates.append(Path(r) / clean)
+        # Support dotted Python unittest module specs (e.g. scripts.tests.test_sentinel)
+        if "." in clean and "/" not in clean and "\\" not in clean and not clean.endswith(".py"):
+            rel_py = clean.replace(".", "/") + ".py"
+            if cwd:
+                candidates.append(Path(cwd) / rel_py)
+            for r in roots:
+                candidates.append(Path(r) / rel_py)
+    for cand in candidates:
+        if cand.exists():
+            return os.path.realpath(str(cand))
+    return None
+
+
+def _is_test_suite_dir(resolved_dir: str, raw_target: str) -> bool:
+    parts = [p.lower() for p in Path(raw_target.replace("\\", "/")).parts if p not in (".", "/", "\\")]
+    if Path(resolved_dir).name.lower() in _TEST_TIER_DIRS:
+        return True
+    return any(p in ("tests", "test", "specs", "spec") for p in parts)
+
+
+def _obligation_covered(
+    obl_path: str,
+    cmd_info: VerificationCmd,
+    roots: list[str],
+    cwd: str | None,
+) -> bool:
+    """True when a passing verification command is scoped to cover the given obligation path."""
+    if not cmd_info.targets and not cmd_info.filters:
+        return True
+    if "__partial_exclude__" in cmd_info.filters:
+        return False
+
+    obl_real = os.path.realpath(obl_path)
+    obl_p = Path(obl_real)
+    stem = obl_p.stem.lower()
+    norm_roots = {os.path.realpath(r) for r in roots}
+
+    if is_test_file(obl_real):
+        base_stem = re.sub(r"^(?:test_|spec_)|(?:_test|_spec)$", "", stem)
+        for t in cmd_info.targets:
+            t_clean = t.split("::", 1)[0].strip()
+            resolved = _resolve_test_target_path(t_clean, roots, cwd)
+            if resolved:
+                if resolved == obl_real or (os.path.isdir(resolved) and obl_real.startswith(resolved + os.sep)):
+                    return True
+            t_stem = Path(t_clean.replace("\\", "/")).stem.lower()
+            if t_stem == stem or t_clean.lower().endswith(f".{stem}"):
+                return True
+        if not cmd_info.targets and cmd_info.filters:
+            for flt in cmd_info.filters:
+                flt_low = flt.lower()
+                if stem in flt_low or (len(base_stem) >= 3 and base_stem in flt_low):
+                    return True
+                # Check if filter targets a test function defined inside this test file
+                if os.path.isfile(obl_real) and os.path.getsize(obl_real) <= 524288:
+                    try:
+                        txt = Path(obl_real).read_text(encoding="utf-8", errors="ignore").lower()
+                        tokens = [tok for tok in re.findall(r"[a-z0-9_]{3,}", flt_low) if tok not in ("and", "not", "or")]
+                        if tokens and any(tok in txt for tok in tokens):
+                            return True
+                    except OSError:
+                        pass
+        return False
+
+    idents: set[str] = set()
+    if stem and stem not in _GENERIC_STEMS and len(stem) >= 2:
+        idents.add(stem)
+    parent = obl_p.parent
+    parent_real = os.path.realpath(str(parent))
+    if parent_real not in norm_roots:
+        parent_name = parent.name.lower()
+        if parent_name and (parent_name not in _GENERIC_PKG_DIRS or not idents) and len(parent_name) >= 2:
+            idents.add(parent_name)
+    if not idents and parent.name:
+        idents.add(parent.name.lower())
+
+    for t in cmd_info.targets:
+        t_clean = t.split("::", 1)[0].strip()
+        resolved = _resolve_test_target_path(t_clean, roots, cwd)
+        if resolved and os.path.isdir(resolved):
+            if obl_real.startswith(resolved + os.sep) or _is_test_suite_dir(resolved, t_clean):
+                return True
+        t_low = t_clean.replace("\\", "/").lower()
+        if any(re.search(rf"(?:^|[^a-z0-9]){re.escape(ident)}(?:$|[^a-z0-9])", t_low) or ident in Path(t_low).stem for ident in idents):
+            return True
+        if resolved and os.path.isfile(resolved) and os.path.getsize(resolved) <= 524288:
+            try:
+                test_src = Path(resolved).read_text(encoding="utf-8", errors="ignore").lower()
+                if any(re.search(rf"\b{re.escape(ident)}\b", test_src) for ident in idents):
+                    return True
+            except OSError:
+                pass
+
+    if not cmd_info.targets and cmd_info.filters:
+        for flt in cmd_info.filters:
+            flt_low = flt.lower()
+            if any(ident in flt_low for ident in idents):
+                return True
+
+    return False
+
+
+def evaluate_verification_evidence(
+    payload: dict[str, Any],
+    cmd_info: VerificationCmd,
+    state_digest: str,
+    *,
+    require_output_evidence: bool = False,
+) -> EvidenceRecord:
+    """Classify observed verification execution into PASS | FAIL | VACUOUS | UNKNOWN."""
+    channel, combined = _extract_output_channel(payload)
+    if cmd_info.dry_run:
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="VACUOUS",
+            channel=channel,
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=False,
+            detail="dry_run_flag",
+        )
+    if _is_tool_failed(payload):
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="FAIL",
+            channel=channel,
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=False,
+            detail="tool_failed",
+        )
+    if channel == "absent":
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="UNKNOWN",
+            channel="absent",
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=not require_output_evidence,
+            detail="host_omitted_output",
+        )
+
+    if cmd_info.runner == "custom_gate":
+        if _GATE_FAILURE_RE.search(combined):
+            return EvidenceRecord(
+                state_digest=state_digest,
+                outcome="FAIL",
+                channel="captured",
+                runner=cmd_info.runner,
+                scope=cmd_info.scope,
+                discharged=False,
+                detail="gate_failed",
+            )
+        if combined.strip():
+            return EvidenceRecord(
+                state_digest=state_digest,
+                outcome="PASS",
+                channel="captured",
+                runner=cmd_info.runner,
+                scope=cmd_info.scope,
+                discharged=True,
+                detail="gate_ok",
+            )
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="VACUOUS",
+            channel="captured",
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=False,
+            detail="empty_output",
+        )
+
+    if _OUTPUT_FAILURE_RE.search(combined):
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="FAIL",
+            channel="captured",
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=False,
+            detail="output_failure",
+        )
+
+    effective_passed = _count_effective_passes(cmd_info.runner, combined)
+    if effective_passed > 0:
+        return EvidenceRecord(
+            state_digest=state_digest,
+            outcome="PASS",
+            channel="captured",
+            runner=cmd_info.runner,
+            scope=cmd_info.scope,
+            discharged=True,
+            detail=f"passed={effective_passed}",
+        )
+
+    is_vacuous = (not combined.strip()) or bool(_VACUOUS_DETAIL_RE.search(combined))
+    return EvidenceRecord(
+        state_digest=state_digest,
+        outcome="VACUOUS" if is_vacuous else "UNKNOWN",
+        channel="captured",
+        runner=cmd_info.runner,
+        scope=cmd_info.scope,
+        discharged=False,
+        detail="zero_effective_passes" if is_vacuous else "no_positive_pass_evidence",
+    )
 
 
 def pre(payload: dict[str, Any]) -> dict[str, str]:
@@ -144,12 +414,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
 
     if name in MUTATE_FILE_TOOLS:
         raw_target = _extract_path_arg(args)
-        if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in (
-            STATE_FILENAME,
-            "operator-router-seen.json",
-            "hook-events.jsonl",
-            "reliability-events.jsonl",
-        ):
+        if isinstance(raw_target, str) and os.path.basename(raw_target.strip()).lower() in STATE_PROTECTED_BASENAMES:
             return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}
 
         resolved = resolve_target(raw_target, roots, artifact_dir=art_dir, cwd=cwd)
@@ -200,9 +465,8 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
             and "/tests/" not in f"/{rel}"
             and has_git
         ):
-            from .policy import load_user_policy
-
-            sprawl_cfg = load_user_policy().get("sprawl") or {}
+            raw_sprawl = load_user_policy().get("sprawl")
+            sprawl_cfg = raw_sprawl if isinstance(raw_sprawl, dict) else {}
             if sprawl_cfg.get("enabled", True):
                 max_new = int(sprawl_cfg.get("max_new_prod_files", 3))
                 try:
@@ -241,7 +505,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         shell_res = check_shell_command(cmd, cwd, roots, subagent, artifact_dir=art_dir)
         if shell_res.get("decision") == "allow" and state_path(payload) is not None:
             st = load_state(payload)
-            if _is_mutating_shell_cmd(cmd) and st.repair_strikes >= 3:
+            if is_mutating_shell_cmd(cmd) and st.repair_strikes >= 3:
                 return {
                     "decision": "deny",
                     "reason": "LIFECYCLE (3-Strike Governor): 3 failed verification cycles after edits. Inspect root cause with read_file before mutating via shell.",
@@ -267,61 +531,103 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
 def post(payload: dict[str, Any]) -> dict[str, Any]:
     if state_path(payload) is None:
         return {}
-    st = load_state(payload)
     failed = _is_tool_failed(payload)
-    st.consecutive_tool_errors = (st.consecutive_tool_errors + 1) if failed else 0
-
+    exit_code = _extract_exit_code(payload)
     tool = payload.get("toolCall") or {}
     name = str(tool.get("name") or "")
     args = tool.get("args") if isinstance(tool.get("args"), dict) else {}
     art_dir = _extract_artifact_dir(payload)
+    subagent = is_subagent(payload)
+    raw_ver = load_user_policy().get("verification")
+    ver_cfg = raw_ver if isinstance(raw_ver, dict) else {}
+    require_output = bool(ver_cfg.get("require_output_evidence", False))
 
-    if name in READ_TOOLS and not failed:
-        if not is_subagent(payload):
-            st.oriented = True
-            if st.repair_strikes >= 3:
-                st.repair_strikes = 2
-    elif name in MUTATE_FILE_TOOLS and not failed:
-        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir, cwd=_extract_cwd(payload, args))
-        if res is not None:
-            rel, full, matched_root = res
-            if matched_root is not None:
-                if is_code_file(full, art_dir):
-                    if full not in st.edited_code_files:
-                        st.edited_code_files.append(full)
-                    st.unverified_code_edits = True
-                    if not is_test_file(full):
-                        st.edited_since_last_fail = True
-                dom = domain_bucket(rel)
-                if dom and dom not in st.edited_domain_dirs:
-                    st.edited_domain_dirs.append(dom)
-    elif name in SHELL_TOOLS:
-        if not failed and not is_subagent(payload):
-            st.oriented = True
-        cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
-        if is_meaningful_verification_command(cmd):
-            if failed:
-                exit_code = None
-                for cont in (payload, payload.get("toolResult"), payload.get("result")):
-                    if isinstance(cont, dict) and isinstance(cont.get("exitCode"), int):
-                        exit_code = cont.get("exitCode")
-                        break
-                if exit_code != 127 and st.unverified_code_edits and st.edited_since_last_fail:
-                    st.repair_strikes += 1
-                    st.edited_since_last_fail = False
-            elif not _is_vacuous_test_output(payload):
-                st.repair_strikes = 0
-                st.unverified_code_edits = False
-                st.edited_since_last_fail = False
-                st.edited_code_files = []
-                st.corrupt = False
-                if is_crucible_strict_cmd(cmd):
-                    st.edited_domain_dirs = []
-        elif not failed and is_code_mutating_shell_cmd(cmd):
-            st.unverified_code_edits = True
-            st.edited_since_last_fail = True
+    roots = effective_roots(payload.get("workspacePaths") or [])
+    cwd = _extract_cwd(payload, args)
 
-    save_state(payload, st)
+    def _mutate(st: SentinelState) -> None:
+        st.consecutive_tool_errors = (st.consecutive_tool_errors + 1) if failed else 0
+
+        if name in READ_TOOLS and not failed:
+            if not subagent:
+                st.oriented = True
+                if st.repair_strikes >= 3:
+                    st.repair_strikes = 2
+        elif name in MUTATE_FILE_TOOLS and not failed:
+            res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir, cwd=cwd)
+            if res is not None:
+                rel, full, matched_root = res
+                if matched_root is not None:
+                    if is_code_file(full, art_dir):
+                        st.mutation_epoch += 1
+                        st.obligations[full] = file_digest(full)
+                        st.verified_files.pop(full, None)
+                        if not is_test_file(full):
+                            st.edited_since_last_fail = True
+                    dom = domain_bucket(rel)
+                    if dom and dom not in st.edited_domain_dirs:
+                        st.edited_domain_dirs.append(dom)
+        elif name in SHELL_TOOLS:
+            if not failed and not subagent:
+                st.oriented = True
+            cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
+            cmd_info = classify_verification_command(cmd)
+            if cmd_info is not None:
+                if cmd_info.pre_mutated:
+                    st.mutation_epoch += 1
+                    st.shell_dirty = True
+                    st.edited_since_last_fail = True
+                tracked = set(st.obligations) | set(st.verified_files)
+                live_hashes = {p: file_digest(p) for p in tracked}
+                digest = compute_state_digest(st.mutation_epoch, live_hashes, st.shell_dirty)
+                ev = evaluate_verification_evidence(payload, cmd_info, digest, require_output_evidence=require_output)
+                if ev.outcome == "FAIL":
+                    st.last_evidence = ev
+                    if exit_code != 127 and st.has_open_obligations and st.edited_since_last_fail:
+                        st.repair_strikes += 1
+                        st.edited_since_last_fail = False
+                elif ev.discharged:
+                    is_suite_wide = not cmd_info.targets and not cmd_info.filters
+                    if is_suite_wide:
+                        st.repair_strikes = 0
+                        st.edited_since_last_fail = False
+                        st.corrupt = False
+                        st.shell_dirty = False
+                        st.verified_files = live_hashes
+                        st.obligations = {}
+                        if cmd_info.scope == "crucible_strict":
+                            st.edited_domain_dirs = []
+                        st.last_evidence = ev
+                    else:
+                        covered = [p for p in list(st.obligations) if _obligation_covered(p, cmd_info, roots, cwd)]
+                        for p in covered:
+                            st.obligations.pop(p, None)
+                            st.verified_files[p] = live_hashes.get(p, file_digest(p))
+                        if covered:
+                            if not st.has_open_obligations:
+                                st.repair_strikes = 0
+                                st.edited_since_last_fail = False
+                            st.last_evidence = ev
+                        elif st.has_open_obligations:
+                            st.last_evidence = EvidenceRecord(
+                                state_digest=ev.state_digest,
+                                outcome=ev.outcome,
+                                channel=ev.channel,
+                                runner=ev.runner,
+                                scope=ev.scope,
+                                discharged=False,
+                                detail="unrelated_scope",
+                            )
+                        else:
+                            st.last_evidence = ev
+                else:
+                    st.last_evidence = ev
+            elif not failed and is_code_mutating_shell_cmd(cmd):
+                st.mutation_epoch += 1
+                st.shell_dirty = True
+                st.edited_since_last_fail = True
+
+    update_state(payload, _mutate)
     return {}
 
 
@@ -379,22 +685,62 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
         return {"decision": "allow"}
     if payload.get("fullyIdle") is False:
         return {"decision": "allow"}
-    exec_num = payload.get("executionNum", 0)
-    if payload.get("continuationActive") or not isinstance(exec_num, int) or exec_num >= 2:
-        return {"decision": "allow"}
 
     roots = effective_roots(payload.get("workspacePaths") or [])
     st = load_state(payload)
+
+    # Atomically detect and record out-of-band / post-verification disk mutations
+    drifted: dict[str, str] = {}
+    if st.verified_files and state_path(payload) is not None:
+        def _check_and_record_drift(cur_st: SentinelState) -> tuple[SentinelState, dict[str, str]]:
+            local_drift: dict[str, str] = {}
+            for p, verified_hash in list(cur_st.verified_files.items()):
+                cur_hash = file_digest(p)
+                if cur_hash != verified_hash:
+                    local_drift[p] = cur_hash
+                    cur_st.obligations[p] = cur_hash
+                    cur_st.verified_files.pop(p, None)
+            if local_drift:
+                cur_st.mutation_epoch += 1
+            return cur_st, local_drift
+
+        res_pair = update_state(payload, _check_and_record_drift)
+        if res_pair is not None:
+            st, drifted = res_pair
+
+    raw_exec = payload.get("executionNum")
+    exec_num = 0 if raw_exec is None else raw_exec
+    if payload.get("continuationActive") or not isinstance(exec_num, int) or isinstance(exec_num, bool) or exec_num >= 2:
+        if st.has_open_obligations or st.corrupt or st.edited_domain_dirs:
+            return {
+                "decision": "allow",
+                "reason": "LIFECYCLE (Unresolved Obligations): Retry cap reached with unverified edits, pending custody checks, or corrupt state; report honestly as incomplete.",
+            }
+        return {"decision": "allow"}
+
     if st.corrupt:
         return {
             "decision": "continue",
             "reason": "LIFECYCLE (State Integrity): sentinel-state.json is corrupt; verify workspace tests before stopping.",
         }
-    problems = _check_acceptance_and_edited_py(roots, st.edited_code_files)
+
+    problems = _check_acceptance_and_edited_py(roots, list(st.obligations.keys()))
     if problems:
         return {"decision": "continue", "reason": "External acceptance check failed: " + "; ".join(problems[:6])}
 
-    if st.unverified_code_edits:
+    if st.has_open_obligations:
+        if drifted:
+            names = ", ".join(os.path.basename(p) for p in sorted(drifted)[:4])
+            return {
+                "decision": "continue",
+                "reason": f"LIFECYCLE (Verify-Before-Stop): Previously verified files changed on disk ({names}). Re-run tests before finishing.",
+            }
+        if st.obligations:
+            names = ", ".join(os.path.basename(p) for p in sorted(st.obligations)[:4])
+            return {
+                "decision": "continue",
+                "reason": f"LIFECYCLE (Verify-Before-Stop): Workspace code ({names}) was modified without a passing verification command covering it. Run tests before finishing.",
+            }
         return {
             "decision": "continue",
             "reason": "LIFECYCLE (Verify-Before-Stop): Workspace code was modified without a passing verification command afterward. Run tests before finishing.",
@@ -422,8 +768,7 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
                 lines = [ln.strip() for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if ln.strip()]
                 detail = lines[-1] if lines else f"exit {proc.returncode}"
                 return {"decision": "continue", "reason": f"Outcome custody check failed: {detail}"}
-        st.edited_domain_dirs = []
-        save_state(payload, st)
+        update_state(payload, lambda s: s.edited_domain_dirs.clear())
 
     if st.consecutive_tool_errors >= 3:
         return {

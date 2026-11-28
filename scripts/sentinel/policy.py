@@ -16,6 +16,7 @@ DOMAIN_DIRS = ("calgary public library", "personal work", "graphs")
 
 HARD_PROTECTED_BASENAMES = {
     "sentinel-state.json",
+    "sentinel-state.lock",
     "operator-router-seen.json",
     "hook-events.jsonl",
     "reliability-events.jsonl",
@@ -282,32 +283,9 @@ def _scan_shell(raw: str) -> tuple[str, list[tuple[str, str]]]:
     return "".join(unquoted_buf), [(s, op) for s, op in segs if s or op]
 
 
-def _strip_shell_comments(raw: str) -> str:
-    _, segs = _scan_shell(raw)
-    return " ; ".join(s for s, _ in segs if s)
-
-
-def _split_shell_segments(raw: str) -> list[tuple[str, str]]:
-    _, segs = _scan_shell(raw)
-    return segs
-
-
 def _strip_quoted_strings(raw: str) -> str:
     unquoted, _ = _scan_shell(raw)
     return unquoted
-
-
-_VERIFY_SEGMENT_RE = re.compile(
-    r"^(?:[a-z_]\w*=\S+\s+)*"
-    r"(?:(?:uv\s+run|poetry\s+run|npx|&\s*)\s+)?"
-    r"(?:"
-    r"(?:[^\s;&|]*[/\\])?(?:pytest|verify_all\.ps1)\b|"
-    r"(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+(?:-m\s+(?:pytest|unittest)\b|(?:[^\s;&|]*[/\\])?crucible_gate\.py\s+(?:check|doctor)\b)|"
-    r"(?:[^\s;&|]*[/\\])?(?:pwsh|powershell)(?:\.exe)?\s+(?:-\S+\s+)*(?:[^\s;&|]*[/\\])?verify_all\.ps1\b|"
-    r"(?:npm\s+(?:test|run\s+test)|cargo\s+test|go\s+test)\b"
-    r")",
-    re.IGNORECASE,
-)
 
 
 def is_mutating_shell_cmd(cmd: str) -> bool:
@@ -348,30 +326,334 @@ def is_crucible_strict_cmd(cmd: str) -> bool:
     return False
 
 
-def is_meaningful_verification_command(cmd: Any) -> bool:
-    """RW-13: True for real test/gate commands; False for comments, masked exits, backgrounded `&`, or version/help probes."""
+import shlex as _shlex
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class VerificationCmd:
+    runner: str  # pytest | unittest | cargo | go | js | custom_gate
+    scope: str  # tests | crucible_strict | gate
+    dry_run: bool = False
+    targets: tuple[str, ...] = ()
+    filters: tuple[str, ...] = ()
+    pre_mutated: bool = False
+
+
+_DRY_RUN_FLAGS_RE = re.compile(
+    r"(?i)(?:^|\s)(?:--collect-only|--co|--setup-only|--setup-plan|--fixtures|--markers|--cache-show|--list|-list|--no-run|--listtests|--list-tests)(?=$|\s|=)"
+)
+_GO_COMPILE_ONLY_RE = re.compile(r"(?:^|\s)-c(?=$|\s)")
+
+_RUNNER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("custom_gate", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*(?:&\s+)?(?:(?:[^\s;&|]*[/\\])?(?:pwsh|powershell|python3?(?:\.\d+)?|py)(?:\.exe)?\s+(?:-\S+\s+)*)?(?:[^\s;&|]*[/\\])?(?:verify_all\.ps1|crucible_gate\.py\s+check)\b", re.IGNORECASE)),
+    ("pytest", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*(?:(?:uv\s+run|poetry\s+run)\s+)?(?:(?:[^\s;&|]*[/\\])?pytest\b|(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+-m\s+pytest\b)", re.IGNORECASE)),
+    ("unittest", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*(?:(?:uv\s+run|poetry\s+run)\s+)?(?:(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+-m\s+unittest\b)", re.IGNORECASE)),
+    ("cargo", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*cargo\s+test\b", re.IGNORECASE)),
+    ("go", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*go\s+test\b", re.IGNORECASE)),
+    ("js", re.compile(r"^(?:[a-z_]\w*=\S+\s+)*(?:npx\s+)?npm\s+(?:test|run\s+test)\b", re.IGNORECASE)),
+)
+
+
+_PYTEST_VALUE_FLAGS = frozenset(
+    {
+        "-o", "-c", "-n", "-W", "-p", "-r", "--rootdir", "--confcutdir", "--maxfail", "--tb",
+        "--junitxml", "--junit-prefix", "--cov", "--cov-report", "--log-cli-level", "--basetemp",
+        "--import-mode", "--durations", "--timeout", "--color", "--capture", "--assert",
+        "--show-capture", "--verbosity", "--override-ini", "--lfnf", "--last-failed-no-failures",
+    }
+)
+_PYTEST_EXCLUDE_FLAGS = frozenset({"--ignore", "--ignore-glob", "--deselect"})
+_UNITTEST_VALUE_FLAGS = frozenset({"-s", "--start-directory", "-t", "--top-level-directory"})
+_GO_VALUE_FLAGS = frozenset(
+    {
+        "-count", "-timeout", "-tags", "-bench", "-benchtime", "-cpu", "-parallel", "-fuzz",
+        "-fuzztime", "-coverpkg", "-covermode", "-coverprofile", "-cpuprofile", "-memprofile",
+        "-outputdir", "-o", "-exec", "-gcflags", "-ldflags", "-mod", "-vet",
+    }
+)
+_CARGO_VALUE_FLAGS = frozenset(
+    {
+        "-j", "--jobs", "--features", "-F", "--target", "--target-dir", "--profile",
+        "--manifest-path", "--color", "--message-format", "--bin", "--example", "--bench",
+    }
+)
+_CARGO_HARNESS_VALUE_FLAGS = frozenset({"--test-threads", "--color", "--format", "--logfile"})
+_JS_VALUE_FLAGS = frozenset({"-c", "--config", "--reporter", "--reporters", "--maxWorkers", "--timeout", "--testTimeout"})
+_GENERIC_SUITE_DIRS = frozenset({".", "./", "tests", "test", "scripts/tests"})
+_REDIR_TOKEN_RE = re.compile(r"^(?:\d*[<>].*|&>.*)$")
+
+
+def _extract_runner_scope(runner: str, seg: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Extract explicit file/package targets and filter expressions from a single test command segment."""
+    if runner == "custom_gate":
+        return (), ()
+    try:
+        tokens = _shlex.split(seg, posix=(os.name != "nt"))
+    except ValueError:
+        tokens = seg.split()
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    if i + 1 < len(tokens) and tokens[i].lower() in ("uv", "poetry", "npx") and tokens[i + 1].lower() in ("run", "npm"):
+        i += 2
+    if i < len(tokens):
+        low0 = os.path.basename(tokens[i].replace("\\", "/")).lower()
+        if runner == "pytest":
+            if low0.startswith("pytest"):
+                i += 1
+            elif i + 2 < len(tokens) and tokens[i + 1] == "-m" and tokens[i + 2].lower() == "pytest":
+                i += 3
+        elif runner == "unittest":
+            if i + 2 < len(tokens) and tokens[i + 1] == "-m" and tokens[i + 2].lower() == "unittest":
+                i += 3
+        elif runner in ("cargo", "go"):
+            if i + 1 < len(tokens) and tokens[i + 1].lower() == "test":
+                i += 2
+        elif runner == "js":
+            if i + 2 < len(tokens) and tokens[i + 1].lower() == "run" and tokens[i + 2].lower() == "test":
+                i += 3
+            elif i + 1 < len(tokens) and tokens[i + 1].lower() == "test":
+                i += 2
+
+    rest = [t for t in tokens[i:] if not _REDIR_TOKEN_RE.match(t)]
+    targets: list[str] = []
+    filters: list[str] = []
+    idx = 0
+
+    if runner == "pytest":
+        while idx < len(rest):
+            tok = rest[idx]
+            if tok in ("-k", "-m") and idx + 1 < len(rest):
+                filters.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok.startswith(("-k=", "-m=")):
+                filters.append(tok[3:])
+                idx += 1
+                continue
+            if tok in _PYTEST_EXCLUDE_FLAGS and idx + 1 < len(rest):
+                filters.append("__partial_exclude__")
+                idx += 2
+                continue
+            if any(tok.startswith(f"{ef}=") for ef in _PYTEST_EXCLUDE_FLAGS):
+                filters.append("__partial_exclude__")
+                idx += 1
+                continue
+            if tok in _PYTEST_VALUE_FLAGS and idx + 1 < len(rest):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            norm = tok.replace("\\", "/").rstrip("/") or "."
+            if norm not in _GENERIC_SUITE_DIRS:
+                targets.append(tok)
+            idx += 1
+    elif runner == "unittest":
+        is_discover = bool(rest and rest[0] == "discover")
+        if is_discover:
+            idx = 1
+        while idx < len(rest):
+            tok = rest[idx]
+            if tok == "-k" and idx + 1 < len(rest):
+                filters.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok in ("-p", "--pattern") and idx + 1 < len(rest):
+                pat = rest[idx + 1]
+                if "*" not in pat and "?" not in pat:
+                    targets.append(pat)
+                idx += 2
+                continue
+            if tok in _UNITTEST_VALUE_FLAGS and idx + 1 < len(rest):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            if not is_discover:
+                targets.append(tok)
+            idx += 1
+    elif runner == "go":
+        while idx < len(rest):
+            tok = rest[idx]
+            if tok == "-run" and idx + 1 < len(rest):
+                filters.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok.startswith("-run="):
+                filters.append(tok[5:])
+                idx += 1
+                continue
+            if tok in _GO_VALUE_FLAGS and idx + 1 < len(rest):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            if tok not in ("./...", ".", "..."):
+                targets.append(tok)
+            idx += 1
+    elif runner == "cargo":
+        after_dd = False
+        while idx < len(rest):
+            tok = rest[idx]
+            if tok == "--" and not after_dd:
+                after_dd = True
+                idx += 1
+                continue
+            if after_dd:
+                if tok == "--skip" and idx + 1 < len(rest):
+                    filters.append("__partial_exclude__")
+                    idx += 2
+                    continue
+                if tok.startswith("--skip="):
+                    filters.append("__partial_exclude__")
+                    idx += 1
+                    continue
+                if tok in _CARGO_HARNESS_VALUE_FLAGS and idx + 1 < len(rest):
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                filters.append(tok)
+                idx += 1
+                continue
+            if tok == "--test" and idx + 1 < len(rest):
+                targets.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok in ("-p", "--package") and idx + 1 < len(rest):
+                targets.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok in _CARGO_VALUE_FLAGS and idx + 1 < len(rest):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            filters.append(tok)
+            idx += 1
+    elif runner == "js":
+        while idx < len(rest):
+            tok = rest[idx]
+            if tok == "--":
+                idx += 1
+                continue
+            if tok in ("-t", "--testNamePattern", "--grep", "-g") and idx + 1 < len(rest):
+                filters.append(rest[idx + 1])
+                idx += 2
+                continue
+            if tok.startswith(("-t=", "--testNamePattern=", "--grep=")):
+                filters.append(tok.split("=", 1)[1])
+                idx += 1
+                continue
+            if tok in _JS_VALUE_FLAGS and idx + 1 < len(rest):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            norm = tok.replace("\\", "/").rstrip("/") or "."
+            if norm not in _GENERIC_SUITE_DIRS:
+                targets.append(tok)
+            idx += 1
+
+    return tuple(targets), tuple(filters)
+
+
+def classify_verification_command(cmd: Any) -> VerificationCmd | None:
+    """Classify a verification command into (runner, scope, dry_run, targets, filters, pre_mutated)."""
     if not isinstance(cmd, str) or not cmd.strip():
-        return False
+        return None
     unquoted, segs = _scan_shell(cmd)
     if not segs:
-        return False
+        return None
     # Reject --version / -V / --help / -h only on unquoted tokens
     if re.search(r"(?:^|\s)(?:--version|-V|--help|-h)(?:\s|$)", unquoted):
-        return False
-    # Reject any `||` or `&` branch (short-circuit/background masking like `pytest & true` or `pytest || echo ok`)
+        return None
+    # Reject any `||` or `&` branch (short-circuit/background masking)
     if any(op in ("||", "&") for _, op in segs):
-        return False
-    matched_idx = -1
+        return None
+
+    matched: list[tuple[int, str, str, bool]] = []
+    matched_indices: set[int] = set()
     for idx, (s, _) in enumerate(segs):
-        if s and _VERIFY_SEGMENT_RE.match(s):
-            matched_idx = idx
-    if matched_idx < 0:
-        return False
-    # Reject trailing `;` or `|` after the verification command (masks non-zero exit code via `pytest; true` or `pytest | true`)
-    for idx in range(matched_idx, len(segs) - 1):
+        if not s:
+            continue
+        for runner_name, pat in _RUNNER_PATTERNS:
+            if pat.match(s):
+                seg_unquoted = _strip_quoted_strings(s)
+                is_dry = bool(_DRY_RUN_FLAGS_RE.search(seg_unquoted)) or (
+                    runner_name == "go" and bool(_GO_COMPILE_ONLY_RE.search(seg_unquoted))
+                )
+                matched.append((idx, runner_name, s, is_dry))
+                matched_indices.add(idx)
+                break
+    if not matched:
+        return None
+
+    first_idx = matched[0][0]
+    last_idx = matched[-1][0]
+    # Reject trailing `;` or `|` after any matched verification command
+    for idx in range(first_idx, len(segs) - 1):
         if segs[idx][1] in (";", "|"):
-            return False
-    return True
+            return None
+    # Reject any post-verification `&& <code_mutating_cmd>` (mutation after verification cannot discharge!)
+    for idx in range(last_idx + 1, len(segs)):
+        if is_code_mutating_shell_cmd(segs[idx][0]):
+            return None
+
+    pre_mutated = any(
+        is_code_mutating_shell_cmd(segs[idx][0])
+        for idx in range(0, last_idx)
+        if idx not in matched_indices
+    )
+
+    live_matches = [m for m in matched if not m[3]]
+    if not live_matches:
+        _, runner_name, seg_text, _ = matched[-1]
+        t, f = _extract_runner_scope(runner_name, seg_text)
+        scope = "crucible_strict" if is_crucible_strict_cmd(cmd) else ("gate" if runner_name == "custom_gate" else "tests")
+        return VerificationCmd(
+            runner=runner_name,
+            scope=scope,
+            dry_run=True,
+            targets=t,
+            filters=f,
+            pre_mutated=pre_mutated,
+        )
+
+    all_targets: list[str] = []
+    all_filters: list[str] = []
+    any_suite_wide = False
+    for _, runner_name, seg_text, _ in live_matches:
+        t, f = _extract_runner_scope(runner_name, seg_text)
+        if not t and not f:
+            any_suite_wide = True
+        else:
+            all_targets.extend(t)
+            all_filters.extend(f)
+
+    primary_runner = live_matches[-1][1]
+    scope = "crucible_strict" if is_crucible_strict_cmd(cmd) else ("gate" if primary_runner == "custom_gate" else "tests")
+    return VerificationCmd(
+        runner=primary_runner,
+        scope=scope,
+        dry_run=False,
+        targets=() if any_suite_wide else tuple(all_targets),
+        filters=() if any_suite_wide else tuple(all_filters),
+        pre_mutated=pre_mutated,
+    )
+
+
+def is_meaningful_verification_command(cmd: Any) -> bool:
+    """RW-13: True for real executing test/gate commands; False for dry-runs, comments, masked exits, or probes."""
+    vc = classify_verification_command(cmd)
+    return vc is not None and not vc.dry_run
 
 
 def check_shell_command(
@@ -433,6 +715,7 @@ def check_mcp_call(name: str, args: dict[str, Any], subagent: bool) -> dict[str,
 _DEFAULT_POLICY: dict[str, Any] = {
     "version": "1.0",
     "sprawl": {"enabled": True, "max_new_prod_files": 3},
+    "verification": {"require_output_evidence": False},
     "deliverable_hygiene": [],
 }
 

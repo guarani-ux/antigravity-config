@@ -1,13 +1,16 @@
-"""Single-pass Python AST & write-integrity inspector for Sentinel PreToolUse."""
+"""Single-pass Python AST & semantic violation-identity inspector for Sentinel PreToolUse."""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import sys
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Hashable, Sequence, TypeVar
 
 from .policy import is_brain_or_artifact_path, is_test_file
 
@@ -29,6 +32,40 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _PLACEHOLDER_SECRET_RE = re.compile(r"(?:EXAMPLE|DUMMY|PLACEHOLDER|FAKE_?KEY|YOUR_?(?:KEY|TOKEN|PASS)|CHANGE_?ME|XXXX+|000000)", re.IGNORECASE)
 
 _SCRIPTS_ROOT = str(Path(__file__).resolve().parents[1])
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class AstViolation:
+    rule_id: str
+    symbol: str
+    kind: str
+    decision: str
+    message: str
+    line: int = 1
+    scope_target: str = "all"  # "all" | "test" | "prod"
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return (self.rule_id, self.symbol, self.kind)
+
+
+def _newly_introduced(
+    new_items: Sequence[T],
+    old_items: Sequence[T],
+    key_fn: Callable[[T], Hashable],
+) -> list[T]:
+    """Multiset subtraction by semantic identity: catches equal-count swaps and boolean collapse."""
+    budget = Counter(key_fn(x) for x in old_items)
+    added: list[T] = []
+    for item in new_items:
+        k = key_fn(item)
+        if budget[k] > 0:
+            budget[k] -= 1
+        else:
+            added.append(item)
+    return added
 
 
 def _secret_matches(text: str) -> list[tuple[str, str]]:
@@ -79,16 +116,26 @@ def _decorator_short_name(dec: ast.expr) -> str:
 
 
 class _PythonAuditVisitor(ast.NodeVisitor):
-    """Collects all AST anti-tampering and quality signals in a single O(N) tree walk."""
+    """Collects all AST anti-tampering and quality signals with lexical scope identities in a single O(N) walk."""
 
     def __init__(self) -> None:
-        self.swallowed_exceptions = 0
-        self.always_true_eq = False
-        self.prod_mock_import = False
-        self.harness_detection = False
-        self.assert_count = 0
-        self.skip_count = 0
-        self.has_test_cheat = False
+        self._scope: list[str] = []
+        self.violations: list[AstViolation] = []
+
+    @property
+    def _current_scope(self) -> str:
+        return ".".join(self._scope) if self._scope else "<module>"
+
+    def _add(
+        self,
+        rule_id: str,
+        kind: str,
+        decision: str,
+        message: str,
+        line: int,
+        scope_target: str = "all",
+    ) -> None:
+        self.violations.append(AstViolation(rule_id, self._current_scope, kind, decision, message, line, scope_target))
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         is_broad = node.type is None or (
@@ -96,13 +143,25 @@ class _PythonAuditVisitor(ast.NodeVisitor):
         )
         effective = [s for s in node.body if not _is_noop_stmt(s)]
         if node.body and not effective:
-            self.swallowed_exceptions += 1
+            self._add(
+                "RW-08",
+                "except_noop",
+                "ask",
+                "RW-08 (Swallowed Exception): Edit introduces silent exception suppression (`except: pass`, `return None`, or `suppress`).",
+                node.lineno,
+            )
         elif is_broad and len(effective) == 1 and isinstance(effective[0], ast.Return):
             val = effective[0].value
             if val is None or (isinstance(val, ast.Constant) and val.value in (None, False)) or (
                 isinstance(val, (ast.List, ast.Dict, ast.Tuple)) and not getattr(val, "elts", getattr(val, "keys", None))
             ):
-                self.swallowed_exceptions += 1
+                self._add(
+                    "RW-08",
+                    "except_broad_return_empty",
+                    "ask",
+                    "RW-08 (Swallowed Exception): Edit introduces silent exception suppression (`except: pass`, `return None`, or `suppress`).",
+                    node.lineno,
+                )
         self.generic_visit(node)
 
     def visit_With(self, node: ast.With) -> None:
@@ -113,70 +172,155 @@ class _PythonAuditVisitor(ast.NodeVisitor):
                 if (isinstance(fn, ast.Name) and fn.id == "suppress") or (
                     isinstance(fn, ast.Attribute) and fn.attr == "suppress"
                 ):
-                    self.swallowed_exceptions += 1
+                    self._add(
+                        "RW-08",
+                        "contextlib_suppress",
+                        "ask",
+                        "RW-08 (Swallowed Exception): Edit introduces silent exception suppression (`except: pass`, `return None`, or `suppress`).",
+                        node.lineno,
+                    )
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(node.name)
         for dec in node.decorator_list:
-            if _decorator_short_name(dec).lower() in ("skip", "skipif", "skipunless", "xfail"):
-                self.skip_count += 1
+            short = _decorator_short_name(dec).lower()
+            if short in ("skip", "skipif", "skipunless", "xfail"):
+                self._add(
+                    "RW-01-SKIP",
+                    f"decorator:{short}",
+                    "ask",
+                    "RW-01 (Test Skip Introduced): Adding `@skip` / `skipTest` / `xfail` requires review.",
+                    dec.lineno,
+                    scope_target="test",
+                )
         self.generic_visit(node)
+        self._scope.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._scope.append(node.name)
         if node.name == "__eq__" and len(node.args.args) >= 2:
             effective = [s for s in node.body if not _is_noop_stmt(s)]
             if len(effective) == 1 and isinstance(effective[0], ast.Return):
                 val = effective[0].value
                 if isinstance(val, ast.Constant) and val.value is True:
-                    self.always_true_eq = True
+                    self._add(
+                        "RW-02",
+                        "always_true_eq",
+                        "deny",
+                        "RW-02 (Reward Hacking Blocked): Defining `def __eq__(self, other): return True` is prohibited.",
+                        node.lineno,
+                    )
         for dec in node.decorator_list:
-            if _decorator_short_name(dec).lower() in ("skip", "skipif", "skipunless", "xfail"):
-                self.skip_count += 1
+            short = _decorator_short_name(dec).lower()
+            if short in ("skip", "skipif", "skipunless", "xfail"):
+                self._add(
+                    "RW-01-SKIP",
+                    f"decorator:{short}",
+                    "ask",
+                    "RW-01 (Test Skip Introduced): Adding `@skip` / `skipTest` / `xfail` requires review.",
+                    dec.lineno,
+                    scope_target="test",
+                )
         self.generic_visit(node)
+        self._scope.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             if alias.name == "unittest.mock" or alias.name.startswith("unittest.mock."):
-                self.prod_mock_import = True
+                self._add(
+                    "RW-11",
+                    f"import:{alias.name}",
+                    "ask",
+                    "RW-11 (Production Mock Injection): Importing `unittest.mock` inside production module.",
+                    node.lineno,
+                    scope_target="prod",
+                )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module and (node.module == "unittest.mock" or node.module.startswith("unittest.mock.")):
-            self.prod_mock_import = True
+            self._add(
+                "RW-11",
+                f"import:{node.module}",
+                "ask",
+                "RW-11 (Production Mock Injection): Importing `unittest.mock` inside production module.",
+                node.lineno,
+                scope_target="prod",
+            )
         elif node.module == "unittest" and any(alias.name == "mock" for alias in node.names):
-            self.prod_mock_import = True
+            self._add(
+                "RW-11",
+                "import:unittest.mock",
+                "ask",
+                "RW-11 (Production Mock Injection): Importing `unittest.mock` inside production module.",
+                node.lineno,
+                scope_target="prod",
+            )
 
     def visit_Assert(self, node: ast.Assert) -> None:
-        self.assert_count += 1
         if not (isinstance(node.test, ast.Constant) and bool(node.test.value) is False) and _is_constant_expr(node.test):
-            self.has_test_cheat = True
+            self._add(
+                "RW-01",
+                "const_assert",
+                "deny",
+                "RW-01 (Test Tampering Blocked): Test introduces `assert True`, `assertTrue(True)`, or `sys.exit(0)`.",
+                node.lineno,
+                scope_target="test",
+            )
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         fn = node.func
         if isinstance(fn, ast.Attribute):
-            if fn.attr.startswith("assert"):
-                self.assert_count += 1
-                if fn.attr == "assertTrue" and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value is True:
-                    self.has_test_cheat = True
+            if fn.attr == "assertTrue" and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value is True:
+                self._add(
+                    "RW-01",
+                    "assert_true_const",
+                    "deny",
+                    "RW-01 (Test Tampering Blocked): Test introduces `assert True`, `assertTrue(True)`, or `sys.exit(0)`.",
+                    node.lineno,
+                    scope_target="test",
+                )
             elif fn.attr == "skipTest":
-                self.skip_count += 1
+                self._add(
+                    "RW-01-SKIP",
+                    "call:skipTest",
+                    "ask",
+                    "RW-01 (Test Skip Introduced): Adding `@skip` / `skipTest` / `xfail` requires review.",
+                    node.lineno,
+                    scope_target="test",
+                )
             elif fn.attr == "exit" and isinstance(fn.value, ast.Name) and fn.value.id == "sys":
                 if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 0:
-                    self.has_test_cheat = True
+                    self._add(
+                        "RW-01",
+                        "sys_exit_0",
+                        "deny",
+                        "RW-01 (Test Tampering Blocked): Test introduces `assert True`, `assertTrue(True)`, or `sys.exit(0)`.",
+                        node.lineno,
+                        scope_target="test",
+                    )
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if node.value == "PYTEST_CURRENT_TEST":
-            self.harness_detection = True
+            self._add(
+                "RW-17",
+                "pytest_current_test",
+                "deny",
+                "RW-17 (Test-Harness Detection Blocked): Production code inspects test runner environment.",
+                node.lineno,
+                scope_target="prod",
+            )
 
 
-def _audit_py(source: str, filename: str = "<candidate>") -> _PythonAuditVisitor:
+def _audit_py(source: str, filename: str = "<candidate>") -> tuple[ast.AST, _PythonAuditVisitor]:
     tree = ast.parse(source, filename=filename)
     visitor = _PythonAuditVisitor()
     visitor.visit(tree)
-    return visitor
+    return tree, visitor
 
 
 def _extract_write_text(args: dict[str, Any]) -> str | None:
@@ -285,14 +429,17 @@ def check_write_integrity(
     else:
         return None
 
-    # Catch split-write (Append=True) and split-edit secret assembly on full candidate
+    # Catch split-write (Append=True) and split-edit secret assembly via semantic secret identity
     if isinstance(candidate, str):
         old_hits = _secret_matches(existing) if existing else []
         new_hits = _secret_matches(candidate)
-        if len(new_hits) > len(old_hits):
-            existing_set = {tok for _, tok in old_hits}
-            added_label = next((lbl for lbl, tok in new_hits if tok not in existing_set), new_hits[0][0])
-            return ("deny", f"RW-18 (Secret Leak Blocked): Detected {added_label} in assembled file content. Store secrets in env vars, never in files.")
+        added_secrets = _newly_introduced(
+            new_hits,
+            old_hits,
+            lambda h: (h[0], hashlib.sha256(h[1].encode("utf-8")).hexdigest()[:16]),
+        )
+        if added_secrets:
+            return ("deny", f"RW-18 (Secret Leak Blocked): Detected {added_secrets[0][0]} in assembled file content. Store secrets in env vars, never in files.")
         if not in_brain:
             from .policy import check_deliverable_hygiene
 
@@ -304,47 +451,57 @@ def check_write_integrity(
         return None
 
     try:
-        new_audit = _audit_py(candidate, abs_path)
+        new_tree, new_audit = _audit_py(candidate, abs_path)
     except SyntaxError as exc:
         return ("deny", f"FM-H02 (Python SyntaxError): Invalid Python syntax at line {exc.lineno}: {exc.msg}.")
 
-    old_audit: _PythonAuditVisitor | None = None
+    old_tree: ast.AST | None = None
+    old_violations: list[AstViolation] = []
     if existing:
         try:
-            old_audit = _audit_py(existing, abs_path)
+            old_tree, old_audit = _audit_py(existing, abs_path)
+            old_violations = old_audit.violations
         except SyntaxError:
-            old_audit = None
+            old_tree = None
+            old_violations = []
 
-    if new_audit.swallowed_exceptions > (old_audit.swallowed_exceptions if old_audit else 0):
-        return ("ask", "RW-08 (Swallowed Exception): Edit introduces silent exception suppression (`except: pass`, `return None`, or `suppress`).")
+    added_ast = _newly_introduced(new_audit.violations, old_violations, lambda v: v.identity)
 
-    if new_audit.always_true_eq and not (old_audit and old_audit.always_true_eq):
-        return ("deny", "RW-02 (Reward Hacking Blocked): Defining `def __eq__(self, other): return True` is prohibited.")
+    # Preserve exact enforcement precedence: RW-08 -> RW-02 -> (brain exit) -> test/prod rules
+    for rule_id in ("RW-08", "RW-02"):
+        for v in added_ast:
+            if v.rule_id == rule_id:
+                return (v.decision, v.message)
 
     if in_brain:
         return None
 
     if is_test_file(abs_path):
-        if new_audit.has_test_cheat and not (old_audit and old_audit.has_test_cheat):
-            return ("deny", "RW-01 (Test Tampering Blocked): Test introduces `assert True`, `assertTrue(True)`, or `sys.exit(0)`.")
-        if new_audit.skip_count > (old_audit.skip_count if old_audit else 0):
-            return ("ask", "RW-01 (Test Skip Introduced): Adding `@skip` / `skipTest` / `xfail` requires review.")
+        for rule_id in ("RW-01", "RW-01-SKIP"):
+            for v in added_ast:
+                if v.scope_target == "test" and v.rule_id == rule_id:
+                    return (v.decision, v.message)
         if _SCRIPTS_ROOT not in sys.path:
             sys.path.insert(0, _SCRIPTS_ROOT)
         try:
             import test_quality_gate
-            findings = test_quality_gate.check_test_source(candidate, abs_path)
-            if findings:
-                old_count = len(test_quality_gate.check_test_source(existing, abs_path)) if existing else 0
-                if not existing or len(findings) > old_count:
-                    f0 = findings[0]
-                    return ("deny", f"{f0.rule_id} (Test Quality Gate, line {f0.line}): {f0.message}")
+
+            new_tq = test_quality_gate.check_test_source(candidate, abs_path, tree=new_tree)
+            old_tq = (
+                test_quality_gate.check_test_source(existing, abs_path, tree=old_tree)
+                if existing and old_tree is not None
+                else []
+            )
+            added_tq = _newly_introduced(new_tq, old_tq, lambda f: f.identity)
+            if added_tq:
+                f0 = added_tq[0]
+                return ("deny", f"{f0.rule_id} (Test Quality Gate, line {f0.line}): {f0.message}")
         except ImportError as exc:
             print(f"sentinel ast_gate warning: could not import test_quality_gate ({exc})", file=sys.stderr)
     else:
-        if new_audit.prod_mock_import and not (old_audit and old_audit.prod_mock_import):
-            return ("ask", "RW-11 (Production Mock Injection): Importing `unittest.mock` inside production module.")
-        if new_audit.harness_detection and not (old_audit and old_audit.harness_detection):
-            return ("deny", "RW-17 (Test-Harness Detection Blocked): Production code inspects test runner environment.")
+        for rule_id in ("RW-11", "RW-17"):
+            for v in added_ast:
+                if v.scope_target == "prod" and v.rule_id == rule_id:
+                    return (v.decision, v.message)
 
     return None

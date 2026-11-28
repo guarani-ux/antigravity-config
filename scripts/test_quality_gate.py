@@ -70,6 +70,12 @@ class TestQualityFinding:
     file: str
     line: int
     message: str
+    symbol: str = "<module>"
+    kind: str = ""
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return (self.rule_id, self.symbol, self.kind or self.message)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -126,21 +132,24 @@ def _is_tautological_assert_call(call: ast.Call) -> bool:
     return False
 
 
-def _has_real_assertion(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[bool, int | None]:
+def _inspect_assertions(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[bool, list[int]]:
     assertion_count = 0
+    tautology_lines: list[int] = []
     for node in ast.walk(fn):
         if isinstance(node, ast.Assert):
             if _is_tautological_compare(node.test):
-                return False, node.lineno
-            assertion_count += 1
+                tautology_lines.append(node.lineno)
+            else:
+                assertion_count += 1
         elif isinstance(node, ast.Call):
             cname = _call_name(node)
             tail = cname.split(".")[-1]
             if tail in ASSERT_METHOD_NAMES or tail.startswith(("assert_", "check_", "verify_")):
                 if _is_tautological_assert_call(node):
-                    return False, node.lineno
-                assertion_count += 1
-    return assertion_count > 0, None
+                    tautology_lines.append(node.lineno)
+                else:
+                    assertion_count += 1
+    return assertion_count > 0, tautology_lines
 
 
 def _is_unconditional_skip_decorator(dec: ast.expr) -> bool:
@@ -186,46 +195,79 @@ def _strip_comments(source: str) -> str:
         return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
 
 
-def check_test_source(source: str, filename: str = "test_unknown.py") -> list[TestQualityFinding]:
-    """Audit Python test source text and return TQ-01..TQ-05 violations."""
+def _collect_scoped_tests(
+    node: ast.AST,
+    prefix: str = "",
+) -> tuple[list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]], list[tuple[str, ast.ClassDef]]]:
+    funcs: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    classes: list[tuple[str, ast.ClassDef]] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef):
+            cls_scope = f"{prefix}.{child.name}" if prefix else child.name
+            classes.append((cls_scope, child))
+            sub_f, sub_c = _collect_scoped_tests(child, cls_scope)
+            funcs.extend(sub_f)
+            classes.extend(sub_c)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn_scope = f"{prefix}.{child.name}" if prefix else child.name
+            if child.name.startswith("test_"):
+                funcs.append((fn_scope, child))
+            sub_f, sub_c = _collect_scoped_tests(child, fn_scope)
+            funcs.extend(sub_f)
+            classes.extend(sub_c)
+        else:
+            sub_f, sub_c = _collect_scoped_tests(child, prefix)
+            funcs.extend(sub_f)
+            classes.extend(sub_c)
+    return funcs, classes
+
+
+def check_test_source(
+    source: str,
+    filename: str = "test_unknown.py",
+    *,
+    tree: ast.AST | None = None,
+) -> list[TestQualityFinding]:
+    """Audit Python test source text and return TQ-01..TQ-05 violations with semantic identities."""
     findings: list[TestQualityFinding] = []
-    try:
-        tree = ast.parse(source, filename=filename)
-    except SyntaxError as exc:
-        findings.append(
-            TestQualityFinding("TQ-SYNTAX", filename, exc.lineno or 1, f"Invalid Python syntax: {exc.msg}")
-        )
-        return findings
-
-    test_funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-            test_funcs.append(node)
-        elif isinstance(node, ast.ClassDef):
-            has_tests = any(
-                isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)) and b.name.startswith("test_")
-                for b in node.body
+    if tree is None:
+        try:
+            tree = ast.parse(source, filename=filename)
+        except SyntaxError as exc:
+            findings.append(
+                TestQualityFinding("TQ-SYNTAX", filename, exc.lineno or 1, f"Invalid Python syntax: {exc.msg}", "<module>", "syntax")
             )
-            if has_tests:
-                for dec in node.decorator_list:
-                    if _is_unconditional_skip_decorator(dec):
-                        findings.append(
-                            TestQualityFinding(
-                                "TQ-02",
-                                filename,
-                                dec.lineno,
-                                f"Test class `{node.name}` uses an unconditional skip; remove or gate on a real platform/capability predicate.",
-                            )
-                        )
+            return findings
 
-    if not test_funcs:
+    scoped_funcs, scoped_classes = _collect_scoped_tests(tree)
+    for cls_scope, cls_node in scoped_classes:
+        has_tests = any(
+            isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)) and b.name.startswith("test_")
+            for b in ast.walk(cls_node)
+            if b is not cls_node
+        )
+        if has_tests:
+            for dec in cls_node.decorator_list:
+                if _is_unconditional_skip_decorator(dec):
+                    findings.append(
+                        TestQualityFinding(
+                            "TQ-02",
+                            filename,
+                            dec.lineno,
+                            f"Test class `{cls_node.name}` uses an unconditional skip; remove or gate on a real platform/capability predicate.",
+                            cls_scope,
+                            "unconditional_skip",
+                        )
+                    )
+
+    if not scoped_funcs:
         findings.append(
-            TestQualityFinding("TQ-01", filename, 1, "Test file defines zero `test_*` functions.")
+            TestQualityFinding("TQ-01", filename, 1, "Test file defines zero `test_*` functions.", "<module>", "zero_test_funcs")
         )
         return findings
 
     # TQ-01 & TQ-02 per test function
-    for fn in test_funcs:
+    for fn_scope, fn in scoped_funcs:
         skip_line = _has_unconditional_skip(fn)
         if skip_line is not None:
             findings.append(
@@ -234,18 +276,23 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     skip_line,
                     f"`{fn.name}` uses an unconditional skip; remove or gate on a real platform/capability predicate.",
+                    fn_scope,
+                    "unconditional_skip",
                 )
             )
-        has_assert, tautology_line = _has_real_assertion(fn)
-        if tautology_line is not None:
-            findings.append(
-                TestQualityFinding(
-                    "TQ-01",
-                    filename,
-                    tautology_line,
-                    f"`{fn.name}` contains a tautological assertion (e.g. `assert True` or `x == x`).",
+        has_assert, tautology_lines = _inspect_assertions(fn)
+        if tautology_lines:
+            for tline in tautology_lines:
+                findings.append(
+                    TestQualityFinding(
+                        "TQ-01",
+                        filename,
+                        tline,
+                        f"`{fn.name}` contains a tautological assertion (e.g. `assert True` or `x == x`).",
+                        fn_scope,
+                        "tautology",
+                    )
                 )
-            )
         elif not has_assert:
             findings.append(
                 TestQualityFinding(
@@ -253,6 +300,8 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     fn.lineno,
                     f"`{fn.name}` has zero assertions or failure expectations.",
+                    fn_scope,
+                    "zero_assertions",
                 )
             )
 
@@ -267,6 +316,8 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     ln,
                     f"Hardcoded machine-specific path `{m_path.group(0)}`; use tempdir/tmp_path fixtures for portability.",
+                    "<module>",
+                    f"user_path:{m_path.group(0).lower()}",
                 )
             )
         m_uuid = SESSION_UUID_RE.search(line)
@@ -277,6 +328,8 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     ln,
                     "Hardcoded local session UUID; build a synthetic session fixture inside tempdir/tmp_path.",
+                    "<module>",
+                    f"session_uuid:{m_uuid.group(0).lower()}",
                 )
             )
 
@@ -300,10 +353,12 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                 filename,
                 1,
                 "Tests pass `execute_hooks=False` / `--skip-exec` without any sibling test executing `execute_hooks=True`.",
+                "<module>",
+                "skip_exec_without_live",
             )
         )
 
-    for fn in test_funcs:
+    for fn_scope, fn in scoped_funcs:
         if "live" not in fn.name.lower():
             continue
         fn_exec_false = False
@@ -325,6 +380,8 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     fn.lineno,
                     f"`{fn.name}` claims live coverage while passing `execute_hooks=False` / `--skip-exec`.",
+                    fn_scope,
+                    "live_test_skip_exec",
                 )
             )
 
@@ -345,11 +402,13 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                 filename,
                 1,
                 "Test module claims end-to-end/integration coverage while importing mock/monkeypatch.",
+                "<module>",
+                "e2e_uses_mock",
             )
         )
 
     # TQ-05: Falsifiability — >=2 tests must include at least one negative/rejection check in assertions or raises
-    if len(test_funcs) >= 2:
+    if len(scoped_funcs) >= 2:
         has_negative = False
         neg_parts: list[str] = []
         for node in ast.walk(tree):
@@ -380,6 +439,8 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
                     filename,
                     1,
                     "Test suite only exercises positive/happy paths; add at least one negative/rejection/failure-path test.",
+                    "<module>",
+                    "missing_negative_test",
                 )
             )
 

@@ -453,6 +453,10 @@ def run_doctor(
             if not isinstance(pol_obj, dict):
                 errors.append("policy.json: must be a JSON object")
             else:
+                for sec in ("sprawl", "verification"):
+                    val = pol_obj.get(sec)
+                    if val is not None and not isinstance(val, dict):
+                        errors.append(f"policy.json: {sec} must be an object")
                 hygiene = pol_obj.get("deliverable_hygiene")
                 if hygiene is not None and not isinstance(hygiene, list):
                     errors.append("policy.json: deliverable_hygiene must be a list")

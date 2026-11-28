@@ -22,7 +22,7 @@ TAIL_READ_BYTES = 256 * 1024  # Read at most last 256 KB when summarizing
 
 _TAG_PATTERNS: tuple[tuple[re.Pattern[str], str | None], ...] = (
     (re.compile(r"\b((?:RW|TQ)-\d{2}|FM-H\d{2})\b"), None),
-    (re.compile(r"\b(Orient-Before-Edit|Verify-Before-Stop|3-Strike Governor)\b"), None),
+    (re.compile(r"\b(Orient-Before-Edit|Verify-Before-Stop|3-Strike Governor|Unresolved Obligations|State Integrity)\b"), None),
     (re.compile(r"Sentinel could not inspect", re.IGNORECASE), "Sentinel-Error"),
     (re.compile(r"Invalid sentinel hook", re.IGNORECASE), "Invalid-Invocation"),
     (re.compile(r"Catastrophic destructive", re.IGNORECASE), "Catastrophic-Shell"),

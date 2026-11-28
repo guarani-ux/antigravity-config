@@ -392,8 +392,8 @@ def run_benchmark() -> dict[str, Any]:
 
         # 24. Subagent read_file must NOT unlock parent's 3-Strike Governor
         _, _, app24, base24 = _new_case_env(tmp_root, "c24_subagent_isolation", oriented=True, env=env)
-        from sentinel.state import SentinelState, save_state
-        save_state(base24, SentinelState(oriented=True, repair_strikes=3, unverified_code_edits=True))
+        from sentinel.state import SentinelState, file_digest, save_state
+        save_state(base24, SentinelState(oriented=True, repair_strikes=3, obligations={str(app24): file_digest(str(app24))}))
         _run_cli(SENTINEL_CLI, "post", {**base24, "parentConversationId": "parent-1", "toolCall": {"name": "view_file", "args": {"AbsolutePath": str(app24)}}}, env)
         check_case(
             catches,
@@ -821,7 +821,7 @@ def run_benchmark() -> dict[str, Any]:
         # 20. `pytest ... 2>&1` in post clears Verify-Before-Stop in stop
         _, _, app_a20, base_a20 = _new_case_env(tmp_root, "a20_stderr_stop", oriented=True, env=env)
         _run_cli(SENTINEL_CLI, "post", {**base_a20, "toolCall": {"name": "write_file", "args": {"Path": str(app_a20), "Content": "x = 11\n"}}}, env)
-        _run_cli(SENTINEL_CLI, "post", {**base_a20, "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest scripts/tests/test_sentinel.py 2>&1"}}, "toolResult": {"stdout": "1 passed in 0.02s"}}, env)
+        _run_cli(SENTINEL_CLI, "post", {**base_a20, "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest tests/test_app.py 2>&1"}}, "toolResult": {"stdout": "1 passed in 0.02s"}}, env)
         check_case(
             allows,
             "pytest_stderr_redirect_clears_stop",
