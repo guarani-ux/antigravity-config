@@ -343,8 +343,30 @@ def _normalize_hooks_for_parity(data: dict[str, Any], config_dir: Path) -> dict[
     import copy
 
     norm = copy.deepcopy(data)
-    cfg_str = str(config_dir)
-    cfg_posix = config_dir.as_posix()
+    cfg_real = config_dir.resolve()
+    cfg_variants = {str(config_dir), config_dir.as_posix(), str(cfg_real), cfg_real.as_posix()}
+    script_prefix_re = re.compile(
+        r'(?:"([^"]+)[/\\]scripts[/\\]([A-Za-z0-9_.\-/\\]+\.py)"'
+        r"|'([^']+)[/\\]scripts[/\\]([A-Za-z0-9_.\-/\\]+\.py)'"
+        r'|([^\s"\']+)[/\\]scripts[/\\]([A-Za-z0-9_.\-/\\]+\.py))'
+    )
+
+    def _replace_prefix(m: re.Match[str]) -> str:
+        if m.group(1) is not None:
+            quote, prefix, rel_py = '"', m.group(1), m.group(2).replace("\\", "/")
+        elif m.group(3) is not None:
+            quote, prefix, rel_py = "'", m.group(3), m.group(4).replace("\\", "/")
+        else:
+            quote, prefix, rel_py = "", m.group(5), m.group(6).replace("\\", "/")
+        if prefix == "__CONFIG_DIR__" or prefix in cfg_variants:
+            return f"{quote}__CONFIG_DIR__/scripts/{rel_py}{quote}"
+        try:
+            if Path(prefix).expanduser().resolve() == cfg_real:
+                return f"{quote}__CONFIG_DIR__/scripts/{rel_py}{quote}"
+        except OSError:
+            pass
+        return m.group(0)
+
     for group_val in norm.values():
         if not isinstance(group_val, dict):
             continue
@@ -366,7 +388,7 @@ def _normalize_hooks_for_parity(data: dict[str, Any], config_dir: Path) -> dict[
                             cmd = "__PYTHON__" + cmd[len(exe) + 2 :]
                         elif cmd.startswith(exe):
                             cmd = "__PYTHON__" + cmd[len(exe) :]
-                    cmd = cmd.replace(cfg_posix, "__CONFIG_DIR__").replace(cfg_str, "__CONFIG_DIR__").replace("\\", "/")
+                    cmd = script_prefix_re.sub(_replace_prefix, cmd)
                     hook_item["command"] = cmd
     return norm
 
