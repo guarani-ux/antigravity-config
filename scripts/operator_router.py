@@ -73,6 +73,17 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         ),
         "SIGNAL [diagnosing-bugs]: Reproduce with a failing command BEFORE forming hypotheses or editing code.",
     ),
+    (
+        "natural_intent",
+        re.compile(
+            r"\b(?:i want (?:a |the )?(?:system|machine|tool|workflow|process|app)|"
+            r"make it so|come as i am|without .* getting in the way)\b",
+            re.IGNORECASE,
+        ),
+        "SIGNAL [natural-intent]: Translate the user's plain-English goal into (1) exact target files, "
+        "(2) blast-radius callers via scripts/code_graph.py if editing code, (3) deterministic invariants, "
+        "and (4) 1-2 messy real-world test cases BEFORE editing. Never require CS jargon from the user.",
+    ),
 )
 
 SPEC_DOC_RE = re.compile(
@@ -221,6 +232,18 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
                 "read that file, execute its mandate, and archive or delete it once consumed."
             )
         steps.append({"systemMessage": {"systemMessage": msg}})
+
+    try:
+        import failure_ledger
+
+        ws = payload.get("workspacePaths") or []
+        scope = Path(str(ws[0])).name if ws else None
+        lessons = failure_ledger.load_recent_lessons(scope=scope, limit=3)
+        if lessons:
+            summary = " | ".join(f"{it['pattern']} -> {it.get('fix') or it['root_cause']}" for it in lessons)
+            steps.append({"systemMessage": {"systemMessage": f"FAILURE LEDGER (avoid repeating): {summary}"}})
+    except Exception:
+        pass
     return {"injectSteps": steps}
 
 

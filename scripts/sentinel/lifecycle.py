@@ -167,6 +167,23 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
             if failed:
                 if st.unverified_code_edits:
                     st.repair_strikes += 1
+                    if st.repair_strikes == 3:
+                        try:
+                            scripts_dir = str(Path(__file__).resolve().parents[1])
+                            if scripts_dir not in sys.path:
+                                sys.path.insert(0, scripts_dir)
+                            import failure_ledger
+
+                            repo_scope = os.path.basename(effective_roots(payload.get("workspacePaths") or [])[0])
+                            failure_ledger.record_failure_lesson(
+                                pattern=f"3-Strike lock on {os.path.basename(st.edited_code_files[-1]) if st.edited_code_files else 'edit'}",
+                                root_cause=f"Verification failed 3x running: {cmd[:120]}",
+                                fix="Inspect callers/tests and root cause before patching again.",
+                                scope=repo_scope,
+                                source="sentinel",
+                            )
+                        except Exception:
+                            pass
             else:
                 st.repair_strikes = 0
                 st.unverified_code_edits = False
