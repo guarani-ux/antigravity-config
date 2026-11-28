@@ -245,3 +245,59 @@ def check_mcp_call(name: str, args: dict[str, Any], subagent: bool) -> dict[str,
             return {"decision": "deny", "reason": f"Tier 2 MCP External Gate prohibited in subagent: `{tool_name}`."}
         return {"decision": "force_ask", "reason": f"Tier 2 MCP External Gate: `{tool_name}` mutates external state; confirm first."}
     return {"decision": "allow", "reason": "Read-only or local spoke MCP tool permitted."}
+
+
+_DEFAULT_POLICY: dict[str, Any] = {
+    "version": "1.0",
+    "sprawl": {"enabled": True, "max_new_prod_files": 3},
+    "deliverable_hygiene": [],
+}
+
+
+def load_user_policy(policy_path: Path | None = None) -> dict[str, Any]:
+    """Load adaptable policy.json from config root (or env override) with safe defaults."""
+    import json
+
+    override = os.environ.get("ANTIGRAVITY_POLICY_PATH", "").strip()
+    target = policy_path or (Path(override).expanduser() if override else Path(__file__).resolve().parents[2] / "policy.json")
+    if not target.is_file():
+        return dict(_DEFAULT_POLICY)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else dict(_DEFAULT_POLICY)
+    except (OSError, ValueError):
+        return dict(_DEFAULT_POLICY)
+
+
+def check_deliverable_hygiene(abs_path: str, text: str, *, policy: dict[str, Any] | None = None) -> str | None:
+    """Return RW-20 hygiene violation message if text violates an active policy.json deliverable profile."""
+    pol = policy if policy is not None else load_user_policy()
+    profiles = pol.get("deliverable_hygiene")
+    if not isinstance(profiles, list):
+        return None
+    norm_path = abs_path.replace("\\", "/")
+    base = os.path.basename(norm_path)
+    ext = os.path.splitext(base)[1].lower()
+    haystack = f"{norm_path}\n{text}"
+
+    for prof in profiles:
+        if not isinstance(prof, dict):
+            continue
+        exts = [str(e).lower() for e in (prof.get("file_extensions") or [])]
+        if exts and ext not in exts:
+            continue
+        excludes = {str(b).lower() for b in (prof.get("exclude_basenames") or [])}
+        if base.lower() in excludes:
+            continue
+        ctx_pat = str(prof.get("context_pattern") or "")
+        if ctx_pat and not re.search(ctx_pat, haystack):
+            continue
+        for rule in prof.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            pat = str(rule.get("pattern") or "")
+            if pat and re.search(pat, text):
+                msg = str(rule.get("message") or "Deliverable hygiene violation.")
+                prof_name = str(prof.get("name") or "deliverable")
+                return f"RW-20 (Deliverable Hygiene [{prof_name}]): {msg}"
+    return None

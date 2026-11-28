@@ -266,6 +266,12 @@ def check_write_integrity(
             existing_set = {tok for _, tok in old_hits}
             added_label = next((lbl for lbl, tok in new_hits if tok not in existing_set), new_hits[0][0])
             return ("deny", f"RW-18 (Secret Leak Blocked): Detected {added_label} in assembled file content. Store secrets in env vars, never in files.")
+        if not in_brain:
+            from .policy import check_deliverable_hygiene
+
+            hygiene_msg = check_deliverable_hygiene(abs_path, candidate)
+            if hygiene_msg is not None:
+                return ("ask", hygiene_msg)
 
     if not abs_path.lower().endswith(".py") or not isinstance(candidate, str):
         return None

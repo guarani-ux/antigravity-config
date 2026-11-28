@@ -20,6 +20,7 @@ from .policy import (
     is_meaningful_verification_command,
     is_protected_path,
     is_subagent,
+    is_test_file,
     resolve_target,
 )
 from .state import STATE_FILENAME, load_state, save_state, state_path
@@ -117,6 +118,48 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
             if subagent and dec in ("ask", "force_ask"):
                 dec = "deny"
             return {"decision": dec, "reason": rsn}
+
+        # RW-19: Stateless Git-based Anti-Sprawl Governor (new non-test prod code files only)
+        if (
+            matched_root is not None
+            and not os.path.isfile(full)
+            and is_code_file(full, art_dir)
+            and not is_test_file(full)
+            and "/tests/" not in rel
+            and (Path(matched_root) / ".git").exists()
+        ):
+            from .policy import load_user_policy
+
+            sprawl_cfg = load_user_policy().get("sprawl") or {}
+            if sprawl_cfg.get("enabled", True):
+                max_new = int(sprawl_cfg.get("max_new_prod_files", 3))
+                try:
+                    proc = subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=matched_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        check=False,
+                    )
+                    if proc.returncode == 0:
+                        new_prod = 0
+                        for ln in proc.stdout.splitlines():
+                            if len(ln) < 4:
+                                continue
+                            code = ln[:2]
+                            if "?" in code or "A" in code:
+                                p_rel = ln[3:].strip().strip('"').replace("\\", "/")
+                                if is_code_file(p_rel) and not is_test_file(p_rel) and "/tests/" not in f"/{p_rel.lower()}":
+                                    new_prod += 1
+                        if new_prod >= max_new:
+                            dec = "deny" if subagent else "force_ask"
+                            return {
+                                "decision": dec,
+                                "reason": f"RW-19 (Sprawl Governor): {new_prod} new production code files already uncommitted (limit {max_new}). Confirm this new file is needed or fold into existing modules.",
+                            }
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         return {"decision": "allow", "reason": "Workspace edit verified."}
 
     if name in SHELL_TOOLS:

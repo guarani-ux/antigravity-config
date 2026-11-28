@@ -255,6 +255,15 @@ def run_doctor(
     _check_mcp_manifest(config_dir / "mcp_config.portable.json", errors, required=True, check_placeholders=False)
     _check_mcp_manifest(config_dir / "mcp_config.json", errors, required=check_installed, check_placeholders=True)
 
+    pol_path = config_dir / "policy.json"
+    if pol_path.is_file():
+        try:
+            pol_obj = json.loads(pol_path.read_text(encoding="utf-8"))
+            if not isinstance(pol_obj, dict):
+                errors.append("policy.json: must be a JSON object")
+        except (OSError, ValueError) as exc:
+            errors.append(f"Invalid JSON in policy.json: {exc}")
+
     # 2. Constitution parity
     global_src = config_dir / "GEMINI.global.md"
     if not global_src.is_file():

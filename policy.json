@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "sprawl": {
+    "enabled": true,
+    "max_new_prod_files": 3
+  },
+  "deliverable_hygiene": [
+    {
+      "name": "calgary-public-library",
+      "file_extensions": [".md", ".txt"],
+      "context_pattern": "(?i)calgary\\s+public\\s+library|calgary-library-production|series_pitch|production_brief|concept_outline|av_script|call_sheet|shot_list",
+      "exclude_basenames": ["SKILL.md", "README.md", "AGENTS.md", "GEMINI.md", "GEMINI.global.md", "Working_Context.md"],
+      "rules": [
+        {
+          "pattern": "\\bCPL\\b",
+          "message": "Spell out 'Calgary Public Library' or 'the Library' instead of 'CPL'."
+        },
+        {
+          "pattern": "(?i)\\btiktok\\b",
+          "message": "Calgary Public Library does not publish on TikTok; use Instagram Reels or YouTube Shorts."
+        },
+        {
+          "pattern": "\\u2014",
+          "message": "Avoid em-dashes in Calgary Public Library deliverables; use commas, colons, or hyphens."
+        }
+      ]
+    }
+  ]
+}
