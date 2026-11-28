@@ -21,9 +21,11 @@ HARD_PROTECTED_BASENAMES = {
     "reliability-events.jsonl",
     "hooks.json",
     "hooks.json.portable",
+    "policy.json",
     "sentinel.py",
     "operator_router.py",
     "test_quality_gate.py",
+    "crucible_gate.py",
     "acceptance.lock.json",
     ".env",
     "agents.md",
@@ -34,26 +36,36 @@ PROTECTED_REL_PREFIXES = (
     ".git",
     ".agents/hooks.json",
     ".agents/acceptance.lock.json",
+    ".agents/scripts/crucible_gate.py",
     "scripts/sentinel",
+)
+
+_GIT_GLOBAL_FLAGS = (
+    r"(?:\s+--(?:git-dir|work-tree|namespace|super-prefix|config-env|exec-path|list-cmds)(?:=|\s+)\S+"
+    r"|\s+-[Cc]\s*\S+"
+    r"|\s+-[A-Za-z]\S*"
+    r"|\s+--\S+)*"
 )
 
 CATASTROPHIC_SHELL_RE = re.compile(
     r"(?i)(?:"
     r"\b(?:Remove-Item\s+.*-(?:Recurse|Force)\s+.*\.git|\.git.*Remove-Item)\b|"
     r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+.*\.git\b|"
-    r"\bgit\s+clean\s+-[a-z]*f|"
+    r"\bgit" + _GIT_GLOBAL_FLAGS + r"\s+clean\s+-[a-z]*f|"
     r"\bformat(?:\.com)?\s+[A-Z]:|"
     r"\bdiskpart\b|"
     r"\bDROP\s+(?:DATABASE|SCHEMA)\b"
     r")"
 )
 
+_CMD_PREFIX = r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:(?:sudo|env|command)\s+)*(?:(?:/[^\s;&|]+/)?)?"
+
 TIER_1_2_SHELL_RE = re.compile(
     r"(?i)(?:"
     r"\brm\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b|"
-    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:rmdir|Remove-Item|rm|del|unlink)\b|"
-    r"(?:^|[;&|]\s*)git\s+(?:reset\s+--hard|restore\s+\.|checkout\s+--\s+\.|branch\s+-[a-z]*d|push)\b|"
-    r"(?:^|[;&|]\s*)gh\s+(?:pr\s+merge|release)\b|"
+    + _CMD_PREFIX + r"(?:rmdir|Remove-Item|rm|del|unlink)\b|"
+    + _CMD_PREFIX + r"git" + _GIT_GLOBAL_FLAGS + r"\s+(?:reset\s+--hard|restore\s+\.|checkout\s+--\s+\.|branch\s+-[a-z]*d|push)\b|"
+    + _CMD_PREFIX + r"gh\s+(?:pr\s+merge|release)\b|"
     r"\b(?:npm\s+publish|twine\s+upload|terraform\s+apply|kubectl\s+(?:apply|delete|create))\b|"
     r"\b(?:pip\s+install|npm\s+(?:install|i|uninstall|remove)|poetry\s+add)\b|"
     r"\bDROP\s+TABLE\b"
@@ -63,23 +75,31 @@ TIER_1_2_SHELL_RE = re.compile(
 _HARMLESS_REDIRECT_RE = re.compile(r"(?:\d*>&\d+|(?:\d*)?>\s*/dev/null)", re.IGNORECASE)
 
 SHELL_MUTATION_RE = re.compile(
-    r"(?i)(?:>|>>|\b(?:set-content|add-content|out-file|remove-item|move-item|copy-item|cp|mv|tee)\b|"
-    r"\bsed\s+-i|\bwrite_text\b|\bwrite_bytes\b|\bos\.replace\b|\bshutil\.|"
-    r"\bopen\s*\([^)]*,\s*['\"][wa+])"
+    r"(?i)(?:>|>>|\b(?:set-content|add-content|out-file|remove-item|move-item|copy-item|cp|mv|tee|unlink|remove|truncate|chmod|chown|dd)\b|"
+    r"\bln\s|\bsed\s+-i|\bwrite_text\b|\bwrite_bytes\b|\bos\.(?:replace|rename)\b|\bshutil\.|"
+    r"\bopen\s*\([^)]*,\s*['\"][wa+]|mode\s*=\s*['\"][wa+])"
+)
+
+_INLINE_INTERPRETER_RE = re.compile(
+    r"(?i)\b(?:python3?(?:\.\d+)?|py|node|pwsh|powershell|bash|sh)(?:\.exe)?(?:\s+-[A-Za-z0-9-]+)*\s+(?:-[a-z]*c|-e|--eval|-command|<<)"
 )
 
 GOV_COMMAND_TOKENS = (
     ".agents/hooks.json",
     ".agents/acceptance.lock.json",
     ".gemini/config/hooks.json",
+    "policy.json",
     "sentinel.py",
     "operator_router.py",
     "test_quality_gate.py",
+    "crucible_gate.py",
     "scripts/sentinel",
     "sentinel-state.json",
     "operator-router-seen.json",
     "hook-events.jsonl",
     "reliability-events.jsonl",
+    "agents.md",
+    "gemini.md",
 )
 
 MCP_MUTATING_RE = re.compile(
@@ -180,24 +200,97 @@ def domain_bucket(rel: str) -> str | None:
     return first if first in DOMAIN_DIRS else None
 
 
+def _strip_shell_comments(raw: str) -> str:
+    out: list[str] = []
+    in_s = False
+    in_d = False
+    for i, ch in enumerate(raw):
+        if ch == "'" and not in_d:
+            in_s = not in_s
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+        elif ch == "#" and not in_s and not in_d and (i == 0 or raw[i - 1].isspace()):
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def _split_shell_segments(raw: str) -> list[tuple[str, str]]:
+    """Split shell command into (segment_text, following_operator) tuples outside quotes."""
+    segs: list[tuple[str, str]] = []
+    buf: list[str] = []
+    in_s = False
+    in_d = False
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "'" and not in_d:
+            in_s = not in_s
+            buf.append(ch)
+            i += 1
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+            buf.append(ch)
+            i += 1
+        elif not in_s and not in_d:
+            two = raw[i : i + 2]
+            if two in ("&&", "||"):
+                segs.append(("".join(buf).strip(), two))
+                buf = []
+                i += 2
+            elif ch in (";", "|"):
+                segs.append(("".join(buf).strip(), ch))
+                buf = []
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+        else:
+            buf.append(ch)
+            i += 1
+    segs.append(("".join(buf).strip(), ""))
+    return [(s, op) for s, op in segs if s or op]
+
+
+_VERIFY_SEGMENT_RE = re.compile(
+    r"^(?:[a-z_]\w*=\S+\s+)*"
+    r"(?:(?:uv\s+run|poetry\s+run|npx|&\s*)\s+)?"
+    r"(?:"
+    r"(?:[^\s;&|]*[/\\])?(?:pytest|verify_all\.ps1)\b|"
+    r"(?:[^\s;&|]*[/\\])?(?:python3?(?:\.\d+)?|py)(?:\.exe)?\s+(?:-m\s+(?:pytest|unittest)\b|(?:[^\s;&|]*[/\\])?(?:crucible_gate\.py\s+(?:check|doctor)|test_quality_gate\.py)\b)|"
+    r"(?:[^\s;&|]*[/\\])?(?:pwsh|powershell)(?:\.exe)?\s+(?:-\S+\s+)*(?:[^\s;&|]*[/\\])?verify_all\.ps1\b|"
+    r"(?:npm\s+(?:test|run\s+test)|cargo\s+test|go\s+test)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def is_meaningful_verification_command(cmd: Any) -> bool:
-    """RW-13: True for real test/gate commands; False for version/help/status probes."""
+    """RW-13: True for real test/gate commands; False for comments, masked exits, or version/help probes."""
     if not isinstance(cmd, str) or not cmd.strip():
         return False
-    raw = cmd.strip()
+    raw = _strip_shell_comments(cmd).strip()
+    if not raw:
+        return False
     # Reject --version / -V / --help / -h case-sensitively so verbose -v (unittest -v, pytest -v) passes
     if re.search(r"(?:^|\s)(?:--version|-V|--help|-h)(?:\s|$)", raw):
         return False
-    c = raw.lower()
-    if re.match(r"^(?:echo|dir|ls|pwd|whoami|get-childitem|get-content|type|cat|touch|git\s+(?:status|diff|log|branch|show|add))\b", c):
+    segs = _split_shell_segments(raw)
+    # Reject any `||` branch (short-circuit bypass `true || pytest` or failure masking `pytest || echo ok`)
+    if any(op == "||" for _, op in segs):
         return False
-    return bool(
-        re.search(
-            r"\b(?:pytest|unittest|verify_all\.ps1|crucible_gate\.py\s+(?:check|doctor)|"
-            r"test_quality_gate\.py|npm\s+(?:test|run\s+test)|cargo\s+test|go\s+test)\b",
-            c,
-        )
-    )
+    matched_idx = -1
+    for idx, (s, _) in enumerate(segs):
+        if s and _VERIFY_SEGMENT_RE.match(s):
+            matched_idx = idx
+    if matched_idx < 0:
+        return False
+    # Reject trailing `;` after the verification command (masks non-zero exit code via `pytest; true`)
+    for idx in range(matched_idx, len(segs) - 1):
+        if segs[idx][1] == ";":
+            return False
+    return True
 
 
 def check_shell_command(
@@ -213,6 +306,15 @@ def check_shell_command(
 
     if CATASTROPHIC_SHELL_RE.search(cmd):
         return {"decision": "deny", "reason": f"Catastrophic destructive command denied: {cmd}"}
+
+    from .ast_gate import detect_secret_leak
+
+    secret_hit = detect_secret_leak(cmd)
+    if secret_hit is not None:
+        return {
+            "decision": "deny",
+            "reason": f"RW-18 (Secret Leak Blocked): Detected {secret_hit} in shell command. Store secrets in env vars, never inline.",
+        }
 
     norm_cmd = cmd.lower().replace("\\", "/")
     is_wsl = bool(re.match(r"^\s*wsl(?:\.exe)?\b", norm_cmd))
@@ -230,7 +332,7 @@ def check_shell_command(
     has_env = bool(ENV_FILE_RE.search(norm_cmd))
     has_gov = any(tok in norm_cmd for tok in GOV_COMMAND_TOKENS)
     cleaned_for_mut = _HARMLESS_REDIRECT_RE.sub("", norm_cmd)
-    if has_env or (has_gov and SHELL_MUTATION_RE.search(cleaned_for_mut)):
+    if has_env or (has_gov and (SHELL_MUTATION_RE.search(cleaned_for_mut) or _INLINE_INTERPRETER_RE.search(cleaned_for_mut))):
         if subagent:
             return {"decision": "deny", "reason": "RW-04: Subagents cannot access .env or mutate protected governance/hook files."}
         return {"decision": "force_ask", "reason": "RW-04: Command references .env or mutates protected governance/hook files."}

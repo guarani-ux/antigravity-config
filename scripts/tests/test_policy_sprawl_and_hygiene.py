@@ -57,7 +57,7 @@ class TestPolicySprawlAndHygiene(unittest.TestCase):
                     "name": "write_to_file",
                     "args": {
                         "TargetFile": str(root / "tests" / "test_mod.py"),
-                        "CodeContent": "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n    def test_neg(self):\n        self.assertNotEqual(1 + 1, 3)\n",
+                        "CodeContent": "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(add(1, 1), 2)\n    def test_neg(self):\n        self.assertNotEqual(add(1, 1), 3)\n",
                     },
                 },
             }

@@ -99,8 +99,8 @@ class TestTestQualityGate(unittest.TestCase):
             self.assertGreaterEqual(json.loads(bad.stdout)["count"], 1)
 
             p.write_text(
-                "def test_ok():\n    assert 2 + 2 == 4\n\n"
-                "def test_rejects():\n    assert 'FAIL' != 'PASS'\n",
+                "def test_ok():\n    assert compute(2) == 4\n\n"
+                "def test_rejects():\n    assert run_bad() == 'FAIL'\n",
                 encoding="utf-8",
             )
             good = subprocess.run(

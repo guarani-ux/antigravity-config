@@ -221,8 +221,8 @@ class TestMachineSubsystems(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         report = json.loads(proc.stdout)
         self.assertTrue(report["ok"], report)
-        self.assertEqual(report["catch_rate"], "8/8 (100.0%)")
-        self.assertEqual(report["false_positive_rate"], "0/8 (0.0%)")
+        self.assertEqual(report["catch_rate"], "17/17 (100.0%)")
+        self.assertEqual(report["false_positive_rate"], "0/12 (0.0%)")
         self.assertTrue(report["telemetry_verified"])
         self.assertNotEqual(report["p95_subprocess_ms"], 0.0)
 

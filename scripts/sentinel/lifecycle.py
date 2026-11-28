@@ -13,6 +13,9 @@ from typing import Any
 
 from .ast_gate import check_write_integrity
 from .policy import (
+    SHELL_MUTATION_RE,
+    _HARMLESS_REDIRECT_RE,
+    _strip_shell_comments,
     check_mcp_call,
     check_shell_command,
     domain_bucket,
@@ -33,6 +36,10 @@ MUTATE_FILE_TOOLS = WRITE_TOOLS + EDIT_TOOLS
 SHELL_TOOLS = ("run_command", "command")
 VACUOUS_TEST_OUTPUT_RE = re.compile(
     r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b|\b[1-9]\d*\s+skipped\b)"
+)
+FAILED_TEST_OUTPUT_RE = re.compile(
+    r"(?:\b[1-9]\d*\s+failed\b|\bFAILED\s*\(|^ERROR:\s+\S+\s+\()",
+    re.MULTILINE,
 )
 NONZERO_TEST_OUTPUT_RE = re.compile(
     r"(?i)(?:\b[1-9]\d*\s+(?:passed|passing)\b|\bran\s+[1-9]\d*\s+tests?\b)"
@@ -68,7 +75,7 @@ def _is_tool_failed(payload: dict[str, Any]) -> bool:
 
 
 def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
-    """Return True if captured command output explicitly shows 0 tests executed or all tests skipped."""
+    """Return True if captured command output explicitly shows failures, 0 tests executed, or all tests skipped."""
     chunks: list[str] = []
     for container in (payload, payload.get("toolResult"), payload.get("result")):
         if not isinstance(container, dict):
@@ -80,12 +87,19 @@ def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
     if not chunks:
         return False
     combined = "\n".join(chunks)
+    if FAILED_TEST_OUTPUT_RE.search(combined):
+        return True
     m_unit = UNITTEST_SKIPPED_RE.search(combined)
     if m_unit and int(m_unit.group(2)) >= int(m_unit.group(1)):
         return True
     if NONZERO_TEST_OUTPUT_RE.search(combined):
         return False
     return bool(VACUOUS_TEST_OUTPUT_RE.search(combined))
+
+
+def _is_mutating_shell_cmd(cmd: str) -> bool:
+    cleaned = _HARMLESS_REDIRECT_RE.sub("", cmd.lower().replace("\\", "/"))
+    return bool(SHELL_MUTATION_RE.search(cleaned))
 
 
 def pre(payload: dict[str, Any]) -> dict[str, str]:
@@ -197,7 +211,15 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd")
         if not isinstance(cmd, str) or not cmd.strip():
             return {"decision": "deny" if subagent else "ask", "reason": "Cannot verify command text."}
-        return check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent, artifact_dir=art_dir)
+        shell_res = check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent, artifact_dir=art_dir)
+        if shell_res.get("decision") == "allow" and _is_mutating_shell_cmd(cmd) and state_path(payload) is not None:
+            st = load_state(payload)
+            if st.repair_strikes >= 3:
+                return {
+                    "decision": "deny",
+                    "reason": "LIFECYCLE (3-Strike Governor): 3 failed verification cycles after edits. Inspect root cause with read_file before mutating via shell.",
+                }
+        return shell_res
 
     if name == "call_mcp_tool" or name.startswith("mcp_"):
         return check_mcp_call(name, args, subagent)
@@ -249,8 +271,12 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                 st.unverified_code_edits = False
                 st.edited_since_last_fail = False
                 st.edited_code_files = []
-                if "crucible_gate.py" in cmd.lower() or "verify_all.ps1" in cmd.lower():
+                uncommented = _strip_shell_comments(cmd).lower()
+                if "crucible_gate.py" in uncommented or "verify_all.ps1" in uncommented:
                     st.edited_domain_dirs = []
+        elif not failed and _is_mutating_shell_cmd(cmd):
+            st.unverified_code_edits = True
+            st.edited_since_last_fail = True
 
     save_state(payload, st)
     return {}

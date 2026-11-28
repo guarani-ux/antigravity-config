@@ -22,7 +22,7 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Stripe live key", re.compile(r"(?<![A-Za-z0-9_])(?:sk|rk)_live_[0-9A-Za-z]{24,}(?![A-Za-z0-9_])")),
     ("Slack token", re.compile(r"(?<![A-Za-z0-9\-])xox[baprs]-[0-9A-Za-z\-]{10,}(?![A-Za-z0-9\-])|(?<![A-Za-z0-9\-])xapp-\d-[A-Za-z0-9\-]{10,}(?![A-Za-z0-9\-])")),
     ("HuggingFace/PyPI token", re.compile(r"(?<![A-Za-z0-9_])(?:hf_[A-Za-z0-9]{30,}|pypi-[A-Za-z0-9\-_]{50,})(?![A-Za-z0-9\-_])")),
-    ("database URI credential", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]{8,}@[^/\s]+", re.IGNORECASE)),
+    ("database URI credential", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^/\s:@]+:([^/\s@]{8,})@[^/\s]+", re.IGNORECASE)),
     ("private key PEM block", re.compile(r"-----BEGIN (?:PGP PRIVATE KEY BLOCK|(?:RSA |EC |ECDSA |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----")),
 )
 
@@ -36,7 +36,8 @@ def _secret_matches(text: str) -> list[tuple[str, str]]:
     for label, pat in SECRET_PATTERNS:
         for m in pat.finditer(text):
             tok = m.group(0)
-            if label != "private key PEM block" and _PLACEHOLDER_SECRET_RE.search(tok):
+            check_val = m.group(1) if m.lastindex else tok
+            if label != "private key PEM block" and _PLACEHOLDER_SECRET_RE.search(check_val):
                 continue
             hits.append((label, tok))
     return hits
@@ -60,6 +61,23 @@ def _is_noop_stmt(stmt: ast.stmt) -> bool:
     return False
 
 
+def _is_constant_expr(expr: ast.expr) -> bool:
+    return not any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.Subscript)) for n in ast.walk(expr))
+
+
+def _decorator_short_name(dec: ast.expr) -> str:
+    if isinstance(dec, ast.Attribute):
+        return dec.attr
+    if isinstance(dec, ast.Name):
+        return dec.id
+    if isinstance(dec, ast.Call):
+        if isinstance(dec.func, ast.Attribute):
+            return dec.func.attr
+        if isinstance(dec.func, ast.Name):
+            return dec.func.id
+    return ""
+
+
 class _PythonAuditVisitor(ast.NodeVisitor):
     """Collects all AST anti-tampering and quality signals in a single O(N) tree walk."""
 
@@ -76,10 +94,11 @@ class _PythonAuditVisitor(ast.NodeVisitor):
         is_broad = node.type is None or (
             isinstance(node.type, ast.Name) and node.type.id in ("Exception", "BaseException")
         )
-        if node.body and all(_is_noop_stmt(s) for s in node.body):
+        effective = [s for s in node.body if not _is_noop_stmt(s)]
+        if node.body and not effective:
             self.swallowed_exceptions += 1
-        elif is_broad and len(node.body) == 1 and isinstance(node.body[0], ast.Return):
-            val = node.body[0].value
+        elif is_broad and len(effective) == 1 and isinstance(effective[0], ast.Return):
+            val = effective[0].value
             if val is None or (isinstance(val, ast.Constant) and val.value in (None, False)) or (
                 isinstance(val, (ast.List, ast.Dict, ast.Tuple)) and not getattr(val, "elts", getattr(val, "keys", None))
             ):
@@ -97,24 +116,21 @@ class _PythonAuditVisitor(ast.NodeVisitor):
                     self.swallowed_exceptions += 1
         self.generic_visit(node)
 
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for dec in node.decorator_list:
+            if _decorator_short_name(dec).lower() in ("skip", "skipif", "skipunless", "xfail"):
+                self.skip_count += 1
+        self.generic_visit(node)
+
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         if node.name == "__eq__" and len(node.args.args) >= 2:
-            if len(node.body) == 1 and isinstance(node.body[0], ast.Return):
-                val = node.body[0].value
+            effective = [s for s in node.body if not _is_noop_stmt(s)]
+            if len(effective) == 1 and isinstance(effective[0], ast.Return):
+                val = effective[0].value
                 if isinstance(val, ast.Constant) and val.value is True:
                     self.always_true_eq = True
         for dec in node.decorator_list:
-            dname = ""
-            if isinstance(dec, ast.Attribute):
-                dname = dec.attr
-            elif isinstance(dec, ast.Name):
-                dname = dec.id
-            elif isinstance(dec, ast.Call):
-                if isinstance(dec.func, ast.Attribute):
-                    dname = dec.func.attr
-                elif isinstance(dec.func, ast.Name):
-                    dname = dec.func.id
-            if dname.lower() in ("skip", "skipif", "skipunless", "xfail"):
+            if _decorator_short_name(dec).lower() in ("skip", "skipif", "skipunless", "xfail"):
                 self.skip_count += 1
         self.generic_visit(node)
 
@@ -128,10 +144,12 @@ class _PythonAuditVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module and (node.module == "unittest.mock" or node.module.startswith("unittest.mock.")):
             self.prod_mock_import = True
+        elif node.module == "unittest" and any(alias.name == "mock" for alias in node.names):
+            self.prod_mock_import = True
 
     def visit_Assert(self, node: ast.Assert) -> None:
         self.assert_count += 1
-        if isinstance(node.test, ast.Constant) and node.test.value is True:
+        if not (isinstance(node.test, ast.Constant) and bool(node.test.value) is False) and _is_constant_expr(node.test):
             self.has_test_cheat = True
         self.generic_visit(node)
 

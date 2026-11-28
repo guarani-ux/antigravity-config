@@ -94,9 +94,15 @@ def _call_name(node: ast.Call) -> str:
     return _decorator_name(node.func)
 
 
+def _is_constant_expr(expr: ast.expr) -> bool:
+    return not any(isinstance(n, (ast.Name, ast.Call, ast.Attribute, ast.Subscript)) for n in ast.walk(expr))
+
+
 def _is_tautological_compare(expr: ast.expr) -> bool:
     if isinstance(expr, ast.Constant):
         return bool(expr.value) is True
+    if _is_constant_expr(expr):
+        return True
     if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and len(expr.comparators) == 1:
         if isinstance(expr.ops[0], (ast.Eq, ast.Is)):
             return ast.dump(expr.left) == ast.dump(expr.comparators[0])
@@ -105,8 +111,9 @@ def _is_tautological_compare(expr: ast.expr) -> bool:
 
 def _is_tautological_assert_call(call: ast.Call) -> bool:
     cname = _call_name(call)
-    if cname.endswith("assertTrue") and call.args and isinstance(call.args[0], ast.Constant):
-        return bool(call.args[0].value) is True
+    tail = cname.split(".")[-1]
+    if tail in ASSERT_METHOD_NAMES and call.args and all(_is_constant_expr(a) for a in call.args):
+        return True
     if cname.endswith(("assertEqual", "assertIs")) and len(call.args) >= 2:
         return ast.dump(call.args[0]) == ast.dump(call.args[1])
     return False
@@ -129,17 +136,35 @@ def _has_real_assertion(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[boo
     return assertion_count > 0, None
 
 
+def _is_unconditional_skip_decorator(dec: ast.expr) -> bool:
+    dname = _decorator_name(dec)
+    if dname in ("unittest.skip", "skip", "pytest.mark.skip"):
+        return True
+    if isinstance(dec, ast.Call) and dec.args and isinstance(dec.args[0], ast.Constant):
+        if dname in ("unittest.skipIf", "skipIf", "pytest.mark.skipif") and dec.args[0].value is True:
+            return True
+        if dname in ("unittest.skipUnless", "skipUnless") and dec.args[0].value is False:
+            return True
+    return False
+
+
+def _find_unconditional_skip_in_stmts(stmts: list[ast.stmt]) -> int | None:
+    for stmt in stmts:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            if _call_name(stmt.value) in ("pytest.skip", "self.skipTest"):
+                return stmt.lineno
+        elif isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Constant) and bool(stmt.test.value) is True:
+            hit = _find_unconditional_skip_in_stmts(stmt.body)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _has_unconditional_skip(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> int | None:
     for dec in fn.decorator_list:
-        dname = _decorator_name(dec)
-        if dname in ("unittest.skip", "skip", "pytest.mark.skip"):
+        if _is_unconditional_skip_decorator(dec):
             return dec.lineno
-    for stmt in fn.body:
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            cname = _call_name(stmt.value)
-            if cname in ("pytest.skip", "self.skipTest"):
-                return stmt.lineno
-    return None
+    return _find_unconditional_skip_in_stmts(fn.body)
 
 
 def _strip_comments(source: str) -> str:
@@ -161,6 +186,22 @@ def check_test_source(source: str, filename: str = "test_unknown.py") -> list[Te
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             test_funcs.append(node)
+        elif isinstance(node, ast.ClassDef):
+            has_tests = any(
+                isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)) and b.name.startswith("test_")
+                for b in node.body
+            )
+            if has_tests:
+                for dec in node.decorator_list:
+                    if _is_unconditional_skip_decorator(dec):
+                        findings.append(
+                            TestQualityFinding(
+                                "TQ-02",
+                                filename,
+                                dec.lineno,
+                                f"Test class `{node.name}` uses an unconditional skip; remove or gate on a real platform/capability predicate.",
+                            )
+                        )
 
     if not test_funcs:
         findings.append(
