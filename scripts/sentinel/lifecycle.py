@@ -197,7 +197,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
             and not os.path.isfile(full)
             and is_code_file(full, art_dir)
             and not is_test_file(full)
-            and "/tests/" not in rel
+            and "/tests/" not in f"/{rel}"
             and has_git
         ):
             from .policy import load_user_policy
@@ -207,7 +207,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
                 max_new = int(sprawl_cfg.get("max_new_prod_files", 3))
                 try:
                     proc = subprocess.run(
-                        ["git", "status", "--porcelain"],
+                        ["git", "status", "--porcelain", "-uall"],
                         cwd=matched_root,
                         capture_output=True,
                         text=True,
@@ -238,13 +238,23 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         cmd = args.get("CommandLine") or args.get("command") or args.get("cmd")
         if not isinstance(cmd, str) or not cmd.strip():
             return {"decision": "deny" if subagent else "ask", "reason": "Cannot verify command text."}
-        shell_res = check_shell_command(cmd, args.get("Cwd") or args.get("cwd"), roots, subagent, artifact_dir=art_dir)
-        if shell_res.get("decision") == "allow" and _is_mutating_shell_cmd(cmd) and state_path(payload) is not None:
+        shell_res = check_shell_command(cmd, cwd, roots, subagent, artifact_dir=art_dir)
+        if shell_res.get("decision") == "allow" and state_path(payload) is not None:
             st = load_state(payload)
-            if st.repair_strikes >= 3:
+            if _is_mutating_shell_cmd(cmd) and st.repair_strikes >= 3:
                 return {
                     "decision": "deny",
                     "reason": "LIFECYCLE (3-Strike Governor): 3 failed verification cycles after edits. Inspect root cause with read_file before mutating via shell.",
+                }
+            if (
+                not subagent
+                and not st.oriented
+                and is_code_mutating_shell_cmd(cmd)
+                and any(_has_git_repo(r) for r in effective_roots(roots))
+            ):
+                return {
+                    "decision": "deny",
+                    "reason": "LIFECYCLE (Orient-Before-Edit): Read an entry/target file or run an orientation check before mutating workspace code via shell.",
                 }
         return shell_res
 

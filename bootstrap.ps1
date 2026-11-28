@@ -11,8 +11,15 @@ $PosixConfigDir = $ConfigDir -replace "\\", "/"
 $PyCmd = $null
 foreach ($cand in @("python", "python3", "py")) {
     if (Get-Command $cand -ErrorAction SilentlyContinue) {
-        $PyCmd = $cand
-        break
+        try {
+            & $cand -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $PyCmd = $cand
+                break
+            }
+        } catch {
+            # Skip non-executable Store aliases or broken shims
+        }
     }
 }
 if (-not $PyCmd) {

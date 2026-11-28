@@ -116,6 +116,22 @@ def _check_hooks_manifest(
                 if not script_path.is_file():
                     errors.append(f"{path.name}: referenced hook script not found: scripts/{rel_script}")
 
+    if path.name == "hooks.json.portable":
+        try:
+            from sentinel.lifecycle import MUTATE_FILE_TOOLS, READ_TOOLS, SHELL_TOOLS
+
+            s_obj = data.get("sentinel") or {}
+            pre_m = set(str((s_obj.get("PreToolUse") or [{}])[0].get("matcher") or "").split("|")) - {""}
+            post_m = set(str((s_obj.get("PostToolUse") or [{}])[0].get("matcher") or "").split("|")) - {""}
+            exp_pre = set(MUTATE_FILE_TOOLS) | set(SHELL_TOOLS) | {"call_mcp_tool", "mcp_.*"}
+            exp_post = set(READ_TOOLS) | exp_pre
+            if pre_m != exp_pre:
+                errors.append(f"{path.name}: sentinel.PreToolUse matcher drifted from lifecycle.py tools: diff={sorted(pre_m ^ exp_pre)}")
+            if post_m != exp_post:
+                errors.append(f"{path.name}: sentinel.PostToolUse matcher drifted from lifecycle.py tools: diff={sorted(post_m ^ exp_post)}")
+        except ImportError:
+            pass
+
 
 def _check_mcp_manifest(path: Path, errors: list[str], *, required: bool, check_placeholders: bool) -> None:
     if not path.is_file():
@@ -323,6 +339,63 @@ def _resolve_gemini_dir(config_dir: Path, gemini_dir: Path | None) -> Path:
     return (Path.home() / ".gemini").resolve()
 
 
+def _normalize_hooks_for_parity(data: dict[str, Any], config_dir: Path) -> dict[str, Any]:
+    import copy
+
+    norm = copy.deepcopy(data)
+    cfg_str = str(config_dir)
+    cfg_posix = config_dir.as_posix()
+    for group_val in norm.values():
+        if not isinstance(group_val, dict):
+            continue
+        for ev_val in group_val.values():
+            if not isinstance(ev_val, list):
+                continue
+            for entry in ev_val:
+                if not isinstance(entry, dict):
+                    continue
+                for hook_item in entry.get("hooks") or []:
+                    if not isinstance(hook_item, dict) or not isinstance(hook_item.get("command"), str):
+                        continue
+                    cmd = hook_item["command"].strip()
+                    exe = _first_cmd_token(cmd)
+                    if exe and exe != "__PYTHON__":
+                        if cmd.startswith(f'"{exe}"'):
+                            cmd = "__PYTHON__" + cmd[len(exe) + 2 :]
+                        elif cmd.startswith(f"'{exe}'"):
+                            cmd = "__PYTHON__" + cmd[len(exe) + 2 :]
+                        elif cmd.startswith(exe):
+                            cmd = "__PYTHON__" + cmd[len(exe) :]
+                    cmd = cmd.replace(cfg_posix, "__CONFIG_DIR__").replace(cfg_str, "__CONFIG_DIR__").replace("\\", "/")
+                    hook_item["command"] = cmd
+    return norm
+
+
+def _check_manifest_drift(config_dir: Path, warnings: list[str]) -> None:
+    p_hooks = config_dir / "hooks.json.portable"
+    g_hooks = config_dir / "hooks.json"
+    if p_hooks.is_file() and g_hooks.is_file():
+        try:
+            p_obj = json.loads(p_hooks.read_text(encoding="utf-8"))
+            g_obj = json.loads(g_hooks.read_text(encoding="utf-8"))
+            if isinstance(p_obj, dict) and isinstance(g_obj, dict):
+                if _normalize_hooks_for_parity(g_obj, config_dir) != p_obj:
+                    warnings.append("Installed hooks.json drifted from hooks.json.portable; re-run bootstrap --force")
+        except (OSError, ValueError):
+            pass
+
+    p_mcp = config_dir / "mcp_config.portable.json"
+    g_mcp = config_dir / "mcp_config.json"
+    if p_mcp.is_file() and g_mcp.is_file():
+        try:
+            pm_obj = json.loads(p_mcp.read_text(encoding="utf-8"))
+            gm_obj = json.loads(g_mcp.read_text(encoding="utf-8"))
+            if isinstance(pm_obj, dict) and isinstance(gm_obj, dict) and gm_obj != pm_obj:
+                warnings.append("Installed mcp_config.json drifted from mcp_config.portable.json; re-run bootstrap --force")
+        except (OSError, ValueError):
+            pass
+
+
 def run_doctor(
     config_dir: Path,
     *,
@@ -348,6 +421,8 @@ def run_doctor(
 
     _check_mcp_manifest(config_dir / "mcp_config.portable.json", errors, required=True, check_placeholders=False)
     _check_mcp_manifest(config_dir / "mcp_config.json", errors, required=check_installed, check_placeholders=True)
+    if check_installed:
+        _check_manifest_drift(config_dir, warnings)
 
     pol_path = config_dir / "policy.json"
     if pol_path.is_file():

@@ -84,25 +84,8 @@ _INLINE_INTERPRETER_RE = re.compile(
     r"(?i)\b(?:python3?(?:\.\d+)?|py|node|pwsh|powershell|bash|sh)(?:\.exe)?(?:\s+-[A-Za-z0-9-]+)*\s+(?:-[a-z]*c|-e|--eval|-command|<<)"
 )
 
-GOV_COMMAND_TOKENS = (
-    ".git",
-    ".agents/hooks.json",
-    ".agents/acceptance.lock.json",
-    ".gemini/config/hooks.json",
-    "hooks.json.portable",
-    "hooks.json",
-    "policy.json",
-    "sentinel.py",
-    "operator_router.py",
-    "test_quality_gate.py",
-    "crucible_gate.py",
-    "scripts/sentinel",
-    "sentinel-state.json",
-    "operator-router-seen.json",
-    "hook-events.jsonl",
-    "reliability-events.jsonl",
-    "agents.md",
-    "gemini.md",
+GOV_COMMAND_TOKENS = tuple(
+    sorted((HARD_PROTECTED_BASENAMES - {".env"}) | (set(PROTECTED_REL_PREFIXES) - {".git"}) | {".git/", ".gemini/config/hooks.json"})
 )
 
 MCP_MUTATING_RE = re.compile(

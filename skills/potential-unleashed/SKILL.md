@@ -6,7 +6,7 @@ description: Unified engineering, debugging, and verification loop. Transforms s
 
 Own the outcome, not just the literal words. Skip for pure Q&A or quick copy edits.
 
-1. **Outcome & seam before code:** Restate the real outcome you are making possible. Inspect the live system and probe real environment inputs/payloads before assuming how they work. Before adding files or layers, compare the quick patch against reshaping, combining, or deleting what already exists; recommend the stronger move plainly when it beats a band-aid.
+1. **Outcome & seam before code:** Restate the real outcome you are making possible. Inspect the live system and probe real environment inputs/payloads before assuming how they work. Separate distinct states/modes at the seam (e.g., missing vs. empty vs. invalid) before coding. Before adding files or layers, compare the quick patch against reshaping, combining, or deleting what already exists; recommend the stronger move plainly when it beats a band-aid.
 2. **Thin real slice first:** Never write specs, docs, or mocks for machinery that does not exist yet. Build the smallest real end-to-end path on actual inputs, then thicken only what earns its place. Strip bloat losslessly without dropping invariants or contracts.
 3. **Red before green (through the real doorway):**
    - *Bugs & regressions:* Redact secrets from logs first. Build one fast failing command that reproduces the exact symptom, minimize it, test ranked falsifiable hypotheses one variable at a time, and lock the fix at the real call-site seam.
