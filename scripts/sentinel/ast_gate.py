@@ -241,6 +241,11 @@ def check_write_integrity(
             return ("force_ask", "Lazy placeholder comment (`# ... existing code`) detected; write complete code.")
         if not args.get("Append") and len(new_text.strip()) == 0:
             return ("ask", "Empty file write blocked; truncating to 0 bytes requires review.")
+        if not args.get("Append") and existing is not None:
+            old_lines = len(existing.replace("\r\n", "\n").splitlines())
+            new_lines = len(new_text.replace("\r\n", "\n").splitlines())
+            if old_lines >= 20 and (old_lines - new_lines) > old_lines // 2:
+                return ("ask", "Broad deletion (>50% of existing lines); review proposed diff.")
         candidate: str | None = (existing + new_text) if (args.get("Append") and existing) else new_text
     elif tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content"):
         if existing_read_err:
@@ -320,7 +325,7 @@ def check_write_integrity(
         return None
 
     if is_test_file(abs_path):
-        if new_audit.has_test_cheat:
+        if new_audit.has_test_cheat and not (old_audit and old_audit.has_test_cheat):
             return ("deny", "RW-01 (Test Tampering Blocked): Test introduces `assert True`, `assertTrue(True)`, or `sys.exit(0)`.")
         if new_audit.skip_count > (old_audit.skip_count if old_audit else 0):
             return ("ask", "RW-01 (Test Skip Introduced): Adding `@skip` / `skipTest` / `xfail` requires review.")
@@ -330,8 +335,10 @@ def check_write_integrity(
             import test_quality_gate
             findings = test_quality_gate.check_test_source(candidate, abs_path)
             if findings:
-                f0 = findings[0]
-                return ("deny", f"{f0.rule_id} (Test Quality Gate, line {f0.line}): {f0.message}")
+                old_count = len(test_quality_gate.check_test_source(existing, abs_path)) if existing else 0
+                if not existing or len(findings) > old_count:
+                    f0 = findings[0]
+                    return ("deny", f"{f0.rule_id} (Test Quality Gate, line {f0.line}): {f0.message}")
         except ImportError as exc:
             print(f"sentinel ast_gate warning: could not import test_quality_gate ({exc})", file=sys.stderr)
     else:

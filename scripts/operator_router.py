@@ -162,25 +162,42 @@ def measure_context_pressure(transcript_path: Path | None) -> dict[str, Any]:
     }
 
 
+_FENCED_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_BLOCKQUOTE_LINE_RE = re.compile(r"(?m)^\s*>.*$")
+
+
 def detect_prompt_signals(user_text: str) -> list[str]:
     """Return targeted skill-routing nudges matching user_text."""
     if not user_text:
         return []
+    directive_text = _BLOCKQUOTE_LINE_RE.sub("", _FENCED_BLOCK_RE.sub("", user_text))
     messages: list[str] = []
     matched_pu = False
+    matched_mb = False
     pu_instruction = ""
+
     for signal_id, pattern, instruction in SIGNAL_RULES:
         if signal_id == "potential_unleashed":
             pu_instruction = instruction
-        if pattern.search(user_text):
+            continue
+        if pattern.search(directive_text):
             messages.append(instruction)
-            if signal_id == "potential_unleashed":
-                matched_pu = True
+            if signal_id == "meeting_brief":
+                matched_mb = True
+
+    pu_scope = directive_text
+    if matched_mb and len(directive_text) > 800:
+        pu_scope = directive_text[:300] + "\n" + directive_text[-250:]
+
+    for signal_id, pattern, instruction in SIGNAL_RULES:
+        if signal_id == "potential_unleashed" and pattern.search(pu_scope):
+            messages.append(instruction)
+            matched_pu = True
 
     skip_bug_signal = (
-        len(user_text) > 1500 or bool(SPEC_DOC_RE.search(user_text))
+        len(pu_scope) > 1500 or bool(SPEC_DOC_RE.search(user_text))
     ) and not bool(TRACE_RE.search(user_text))
-    if not matched_pu and not skip_bug_signal and BUG_SIGNAL_RE.search(user_text):
+    if not matched_pu and not skip_bug_signal and BUG_SIGNAL_RE.search(pu_scope):
         messages.append(pu_instruction)
     return messages
 

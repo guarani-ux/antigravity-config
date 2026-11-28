@@ -72,7 +72,7 @@ TIER_1_2_SHELL_RE = re.compile(
     r")"
 )
 
-_HARMLESS_REDIRECT_RE = re.compile(r"(?:\d*>&\d+|(?:\d*)?>\s*/dev/null)", re.IGNORECASE)
+_HARMLESS_REDIRECT_RE = re.compile(r"(?:\d*>&\d+|(?:\d*)?>\s*/dev/null(?=$|[\s;|&)]))", re.IGNORECASE)
 
 SHELL_MUTATION_RE = re.compile(
     r"(?i)(?:>|>>|\b(?:set-content|add-content|out-file|remove-item|move-item|copy-item|cp|mv|tee|unlink|remove|truncate|chmod|chown|dd)\b|"
@@ -341,6 +341,16 @@ def is_mutating_shell_cmd(cmd: str) -> bool:
             joined_segs,
         )
     )
+
+
+def is_code_mutating_shell_cmd(cmd: str) -> bool:
+    """True only if a mutating shell command targets a code extension or uses an inline code interpreter."""
+    if not is_mutating_shell_cmd(cmd):
+        return False
+    low = cmd.lower().replace("\\", "/")
+    if _INLINE_INTERPRETER_RE.search(low):
+        return True
+    return any(re.search(rf"{re.escape(ext)}(?=$|[\s'\"`;&|)])", low) for ext in CODE_EXTS)
 
 
 def is_crucible_strict_cmd(cmd: str) -> bool:

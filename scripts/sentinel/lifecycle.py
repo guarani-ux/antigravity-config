@@ -19,6 +19,7 @@ from .policy import (
     domain_bucket,
     effective_roots,
     is_code_file,
+    is_code_mutating_shell_cmd,
     is_crucible_strict_cmd,
     is_meaningful_verification_command,
     is_mutating_shell_cmd,
@@ -290,7 +291,12 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
         cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
         if is_meaningful_verification_command(cmd):
             if failed:
-                if st.unverified_code_edits and st.edited_since_last_fail:
+                exit_code = None
+                for cont in (payload, payload.get("toolResult"), payload.get("result")):
+                    if isinstance(cont, dict) and isinstance(cont.get("exitCode"), int):
+                        exit_code = cont.get("exitCode")
+                        break
+                if exit_code != 127 and st.unverified_code_edits and st.edited_since_last_fail:
                     st.repair_strikes += 1
                     st.edited_since_last_fail = False
             elif not _is_vacuous_test_output(payload):
@@ -301,7 +307,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                 st.corrupt = False
                 if is_crucible_strict_cmd(cmd):
                     st.edited_domain_dirs = []
-        elif not failed and _is_mutating_shell_cmd(cmd):
+        elif not failed and is_code_mutating_shell_cmd(cmd):
             st.unverified_code_edits = True
             st.edited_since_last_fail = True
 
