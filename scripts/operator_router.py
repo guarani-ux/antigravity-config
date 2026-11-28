@@ -287,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     mode = args[0] if args else ""
     out: dict[str, Any] = {}
+    errored = False
     try:
         raw = sys.stdin.read().strip()
         payload = json.loads(raw) if raw else {}
@@ -299,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             out = {}
     except Exception as exc:
+        errored = True
         print(f"operator_router error: {type(exc).__name__}", file=sys.stderr)
         out = {}
 
@@ -308,11 +310,13 @@ def main(argv: list[str] | None = None) -> int:
 
         steps = out.get("injectSteps") if isinstance(out, dict) else []
         n = len(steps) if isinstance(steps, list) else 0
+        dec = "error" if errored else ("emit" if n > 0 else "abstain")
+        tag = "Router-Error" if errored else (f"nudges={n}" if n > 0 else "")
         record_hook_event(
             mode or "router",
             "operator_router",
-            "emit" if n > 0 else "abstain",
-            f"nudges={n}" if n > 0 else "",
+            dec,
+            tag,
             (time.perf_counter() - t0) * 1000.0,
         )
     except Exception as exc:

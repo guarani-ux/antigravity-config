@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict[str, object] = {}
     tool_name = ""
     out = {}
+    errored = False
     try:
         raw = sys.stdin.read().strip()
         loaded = json.loads(raw) if raw else {}
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         out = handler(payload)
         _emit(out)
     except Exception as exc:
+        errored = True
         if mode == "pre":
             decision = "deny" if is_subagent(payload) else "force_ask"
             out = {"decision": decision, "reason": "Sentinel could not inspect operation."}
@@ -57,8 +59,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"sentinel error: {type(exc).__name__}", file=sys.stderr)
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
-    dec = str(out.get("decision") or ("ok" if mode == "post" else "allow"))
-    tag = extract_rule_tag(str(out.get("reason") or ""))
+    if errored:
+        dec = "error"
+        tag = "Sentinel-Error"
+    else:
+        dec = str(out.get("decision") or ("ok" if mode == "post" else "allow"))
+        tag = extract_rule_tag(str(out.get("reason") or ""))
     _safe_record(mode, tool_name or mode, dec, tag, latency_ms)
     return 0
 

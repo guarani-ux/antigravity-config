@@ -38,7 +38,7 @@ VACUOUS_TEST_OUTPUT_RE = re.compile(
     r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b|\b[1-9]\d*\s+skipped\b)"
 )
 FAILED_TEST_OUTPUT_RE = re.compile(
-    r"(?:\b[1-9]\d*\s+failed\b|\bFAILED\s*\(|^ERROR:\s+\S+\s+\()",
+    r"(?:\b[1-9]\d*\s+(?:failed|errors?)\b|\bFAILED\s*\(|^ERROR:\s+\S+\s+\(|^FAIL\t)",
     re.MULTILINE,
 )
 NONZERO_TEST_OUTPUT_RE = re.compile(
@@ -56,20 +56,42 @@ def _extract_path_arg(args: dict[str, Any]) -> Any:
     return None
 
 
+def _extract_cwd(payload: dict[str, Any], args: dict[str, Any]) -> str | None:
+    for c in (args.get("Cwd"), args.get("cwd"), payload.get("cwd"), payload.get("Cwd")):
+        if isinstance(c, str) and c.strip():
+            return c.strip()
+    return None
+
+
+def _has_git_repo(root_path: str) -> bool:
+    cur = Path(root_path).resolve()
+    for parent in (cur, *cur.parents):
+        if (parent / ".git").exists():
+            return True
+    return False
+
+
 def _extract_artifact_dir(payload: dict[str, Any]) -> str | None:
     art = payload.get("artifactDirectoryPath")
     return art.strip() if isinstance(art, str) and art.strip() else None
 
 
 def _is_tool_failed(payload: dict[str, Any]) -> bool:
-    if payload.get("error"):
-        return True
     for container in (payload, payload.get("toolResult"), payload.get("result")):
         if not isinstance(container, dict):
             continue
+        if container.get("error"):
+            return True
+        if container.get("isError") is True or container.get("success") is False:
+            return True
+        status = container.get("status")
+        if isinstance(status, str) and status.strip().lower() in ("error", "failed", "failure"):
+            return True
         for key in ("exitCode", "exit_code", "returncode"):
             val = container.get(key)
             if isinstance(val, int) and not isinstance(val, bool) and val != 0:
+                return True
+            if isinstance(val, str) and val.strip().lstrip("+-").isdigit() and int(val.strip()) != 0:
                 return True
     return False
 
@@ -78,9 +100,12 @@ def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
     """Return True if captured command output explicitly shows failures, 0 tests executed, or all tests skipped."""
     chunks: list[str] = []
     for container in (payload, payload.get("toolResult"), payload.get("result")):
+        if isinstance(container, str) and container.strip():
+            chunks.append(container)
+            continue
         if not isinstance(container, dict):
             continue
-        for key in ("stdout", "stderr", "output", "text"):
+        for key in ("stdout", "stderr", "output", "text", "content"):
             val = container.get(key)
             if isinstance(val, str) and val.strip():
                 chunks.append(val)
@@ -115,6 +140,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
 
     roots = payload.get("workspacePaths") or []
     art_dir = _extract_artifact_dir(payload)
+    cwd = _extract_cwd(payload, args)
 
     if name in MUTATE_FILE_TOOLS:
         raw_target = _extract_path_arg(args)
@@ -126,7 +152,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
         ):
             return {"decision": "deny", "reason": "RW-06: Direct modification of hook state is prohibited."}
 
-        resolved = resolve_target(raw_target, roots, artifact_dir=art_dir)
+        resolved = resolve_target(raw_target, roots, artifact_dir=art_dir, cwd=cwd)
         if resolved is None:
             if subagent:
                 return {"decision": "deny", "reason": "Subagent cannot write outside mounted workspace."}
@@ -139,6 +165,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
                 "reason": "RW-04: Protected governance, acceptance, hook state, or Git internals; direct modification prohibited.",
             }
 
+        has_git = _has_git_repo(matched_root) if matched_root is not None else False
         if state_path(payload) is not None and matched_root is not None:
             st = load_state(payload)
             if st.repair_strikes >= 3:
@@ -148,7 +175,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
                 }
             if (
                 not subagent
-                and (Path(matched_root) / ".git").exists()
+                and has_git
                 and not st.oriented
                 and (is_code_file(full, art_dir) or os.path.isfile(full))
             ):
@@ -171,7 +198,7 @@ def pre(payload: dict[str, Any]) -> dict[str, str]:
             and is_code_file(full, art_dir)
             and not is_test_file(full)
             and "/tests/" not in rel
-            and (Path(matched_root) / ".git").exists()
+            and has_git
         ):
             from .policy import load_user_policy
 
@@ -244,7 +271,7 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
         if st.repair_strikes >= 3:
             st.repair_strikes = 2
     elif name in MUTATE_FILE_TOOLS and not failed:
-        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir)
+        res = resolve_target(_extract_path_arg(args), payload.get("workspacePaths") or [], artifact_dir=art_dir, cwd=_extract_cwd(payload, args))
         if res is not None:
             rel, full, matched_root = res
             if matched_root is not None:
@@ -368,8 +395,8 @@ def stop(payload: dict[str, Any]) -> dict[str, str]:
                     timeout=5,
                     check=False,
                 )
-            except subprocess.TimeoutExpired:
-                return {"decision": "continue", "reason": "Outcome custody check timed out (>5s)."}
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return {"decision": "continue", "reason": f"Outcome custody check failed ({type(exc).__name__})."}
             if proc.returncode != 0:
                 lines = [ln.strip() for ln in (proc.stdout + "\n" + proc.stderr).splitlines() if ln.strip()]
                 detail = lines[-1] if lines else f"exit {proc.returncode}"

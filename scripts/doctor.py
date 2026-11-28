@@ -213,9 +213,20 @@ def _check_python_scripts_and_imports(config_dir: Path, errors: list[str]) -> in
         if not mod_path.is_file():
             errors.append(f"Core hook module missing: scripts/{rel_file}")
             continue
-        spec = importlib.util.spec_from_file_location(f"_doctor_probe_{mod_name}", mod_path)
+        probe_name = f"_doctor_probe_{mod_name}"
+        spec = importlib.util.spec_from_file_location(probe_name, mod_path)
         if spec is None or spec.loader is None:
             errors.append(f"Cannot load spec for scripts/{rel_file}")
+            continue
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[probe_name] = mod
+            spec.loader.exec_module(mod)
+        except Exception as exc:
+            errors.append(f"Core hook import failed for scripts/{rel_file}: {type(exc).__name__}: {exc}")
+        finally:
+            for k in [k for k in sys.modules if k == probe_name or k.startswith(probe_name + ".")]:
+                sys.modules.pop(k, None)
     return count
 
 

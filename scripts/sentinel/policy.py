@@ -58,7 +58,7 @@ CATASTROPHIC_SHELL_RE = re.compile(
     r")"
 )
 
-_CMD_PREFIX = r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:(?:sudo|env|command)\s+)*(?:(?:/[^\s;&|]+/)?)?"
+_CMD_PREFIX = r"(?:^|[;&|\r\n]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:(?:sudo|env|command)\s+)*(?:(?:/[^\s;&|\r\n]+/)?)?"
 
 TIER_1_2_SHELL_RE = re.compile(
     r"(?i)(?:"
@@ -204,13 +204,21 @@ def _strip_shell_comments(raw: str) -> str:
     out: list[str] = []
     in_s = False
     in_d = False
+    in_comment = False
     for i, ch in enumerate(raw):
+        if ch in ("\n", "\r"):
+            in_comment = False
+            out.append(ch)
+            continue
+        if in_comment:
+            continue
         if ch == "'" and not in_d:
             in_s = not in_s
         elif ch == '"' and not in_s:
             in_d = not in_d
         elif ch == "#" and not in_s and not in_d and (i == 0 or raw[i - 1].isspace()):
-            break
+            in_comment = True
+            continue
         out.append(ch)
     return "".join(out)
 
@@ -239,8 +247,8 @@ def _split_shell_segments(raw: str) -> list[tuple[str, str]]:
                 segs.append(("".join(buf).strip(), two))
                 buf = []
                 i += 2
-            elif ch in (";", "|"):
-                segs.append(("".join(buf).strip(), ch))
+            elif ch in (";", "|", "\n", "\r"):
+                segs.append(("".join(buf).strip(), ";" if ch in ("\n", "\r") else ch))
                 buf = []
                 i += 1
             else:
@@ -341,7 +349,8 @@ def check_shell_command(
 
 
 def check_mcp_call(name: str, args: dict[str, Any], subagent: bool) -> dict[str, str]:
-    tool_name = str(args.get("ToolName") or name).lower()
+    raw_tool = args.get("ToolName") or args.get("tool_name") or args.get("toolName") or args.get("name") or name
+    tool_name = str(raw_tool).lower()
     if MCP_MUTATING_RE.search(tool_name):
         if subagent:
             return {"decision": "deny", "reason": f"Tier 2 MCP External Gate prohibited in subagent: `{tool_name}`."}
@@ -359,6 +368,7 @@ _DEFAULT_POLICY: dict[str, Any] = {
 def load_user_policy(policy_path: Path | None = None) -> dict[str, Any]:
     """Load adaptable policy.json from config root (or env override) with safe defaults."""
     import json
+    import sys
 
     override = os.environ.get("ANTIGRAVITY_POLICY_PATH", "").strip()
     target = policy_path or (Path(override).expanduser() if override else Path(__file__).resolve().parents[2] / "policy.json")
@@ -367,7 +377,8 @@ def load_user_policy(policy_path: Path | None = None) -> dict[str, Any]:
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else dict(_DEFAULT_POLICY)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        print(f"sentinel policy load error ({target.name}): {type(exc).__name__}", file=sys.stderr)
         return dict(_DEFAULT_POLICY)
 
 

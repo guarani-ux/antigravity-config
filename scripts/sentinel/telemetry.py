@@ -33,7 +33,11 @@ _TAG_PATTERNS: tuple[tuple[re.Pattern[str], str | None], ...] = (
     (re.compile(r"Lazy placeholder", re.IGNORECASE), "Lazy-Placeholder"),
     (re.compile(r"Exact no-op", re.IGNORECASE), "No-Op-Edit"),
     (re.compile(r"Broad deletion", re.IGNORECASE), "Broad-Deletion"),
-    (re.compile(r"Could not inspect write|Could not inspect edit", re.IGNORECASE), "Uninspectable-Args"),
+    (re.compile(r"Could not inspect write|Could not inspect edit|Cannot inspect tool arguments", re.IGNORECASE), "Uninspectable-Args"),
+    (re.compile(r"outside (?:the |mounted )?workspace", re.IGNORECASE), "Outside-Workspace"),
+    (re.compile(r"Cannot verify command text", re.IGNORECASE), "Uninspectable-Command"),
+    (re.compile(r"Empty file write blocked", re.IGNORECASE), "Empty-Write"),
+    (re.compile(r"Last three tools failed", re.IGNORECASE), "Consecutive-Errors"),
 )
 
 
@@ -153,6 +157,7 @@ def summarize_telemetry(path: Path | None = None, *, limit_lines: int = 2000) ->
     latencies: list[float] = []
     hook_latencies: dict[str, list[float]] = defaultdict(list)
     valid = 0
+    corrupt = 0
 
     for ln in lines:
         if not ln.strip():
@@ -160,8 +165,10 @@ def summarize_telemetry(path: Path | None = None, *, limit_lines: int = 2000) ->
         try:
             obj = json.loads(ln)
         except ValueError:
+            corrupt += 1
             continue
         if not isinstance(obj, dict):
+            corrupt += 1
             continue
         valid += 1
         dec = str(obj.get("decision") or "unknown")
@@ -190,6 +197,7 @@ def summarize_telemetry(path: Path | None = None, *, limit_lines: int = 2000) ->
         "path": str(target),
         "exists": True,
         "events": valid,
+        "corrupt_lines": corrupt,
         "decisions": dict(decisions),
         "top_blocks": [{"tag": k, "count": v} for k, v in block_tags.most_common(5)],
         "p50_ms": _percentile(latencies, 0.50),

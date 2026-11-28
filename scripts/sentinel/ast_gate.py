@@ -219,11 +219,13 @@ def check_write_integrity(
         return ("deny", "FM-H08 (ArtifactMetadata Misuse): Omit ArtifactMetadata for files outside the artifact brain directory.")
 
     existing: str | None = None
+    existing_read_err = False
     if os.path.isfile(abs_path):
         try:
             existing = Path(abs_path).read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             existing = None
+            existing_read_err = True
 
     if tool_name in ("write_file", "write_to_file"):
         new_text = _extract_write_text(args)
@@ -241,6 +243,8 @@ def check_write_integrity(
             return ("ask", "Empty file write blocked; truncating to 0 bytes requires review.")
         candidate: str | None = (existing + new_text) if (args.get("Append") and existing) else new_text
     elif tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content"):
+        if existing_read_err:
+            return ("ask", "Existing target file is unreadable or non-UTF-8; review required.")
         pairs = _extract_edit_pairs(args)
         if not pairs:
             return ("ask", "Could not inspect edit target/replacement arguments; review required.")
