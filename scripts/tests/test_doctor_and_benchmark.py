@@ -167,16 +167,17 @@ class TestMachineSubsystems(unittest.TestCase):
             clean = doctor.run_doctor(REPO_ROOT, check_installed=False, telemetry_path=isolated_tel)
             self.assertTrue(clean["ok"], clean["errors"])
             self.assertEqual(clean["warnings"], [], clean["warnings"])
+            self.assertEqual(clean["unreachable_scripts"], [])
             skill_names = {s["name"] for s in clean["skills"]}
-            for required in ("plainspoken-partner", "waterwall", "meeting-brief", "diagnosing-bugs"):
-                self.assertIn(required, skill_names)
+            self.assertEqual(skill_names, {"potential-unleashed", "meeting-brief"})
 
-            # Test Windows backslash hook script resolution, GEMINI.md drift, broken skill dir, and unresolved placeholders
+            # Test Windows backslash hook script resolution, GEMINI.md drift, dead script, broken skill dir, and unresolved placeholders
             cfg = Path(tmp) / "config"
             cfg.mkdir(parents=True)
             for fn in ("GEMINI.global.md", "hooks.json.portable", "mcp_config.portable.json"):
                 shutil.copy2(REPO_ROOT / fn, cfg / fn)
             shutil.copytree(REPO_ROOT / "scripts", cfg / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+            (cfg / "scripts" / "dead_orphan.py").write_text("x = 1\n", encoding="utf-8")
 
             # Valid installed GEMINI.md (drifted), invalid Windows backslash script typo, missing SKILL.md dir
             (Path(tmp) / "GEMINI.md").write_text("# Old drifted version\n", encoding="utf-8")
@@ -198,6 +199,8 @@ class TestMachineSubsystems(unittest.TestCase):
             self.assertFalse(bad["ok"])
             joined_err = "\n".join(bad["errors"])
             self.assertIn("missing_hook.py", joined_err)
+            self.assertIn("dead_orphan.py", joined_err)
+            self.assertNotIn("eval_harness.py", joined_err)
             self.assertIn("does_not_exist.sh", joined_err)
             self.assertIn("wrong-name", joined_err)
             self.assertIn("directory missing SKILL.md", joined_err)

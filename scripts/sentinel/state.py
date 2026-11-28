@@ -18,6 +18,7 @@ class SentinelState:
     repair_strikes: int = 0
     consecutive_tool_errors: int = 0
     unverified_code_edits: bool = False
+    edited_since_last_fail: bool = False
     edited_code_files: list[str] = field(default_factory=list)
     edited_domain_dirs: list[str] = field(default_factory=list)
 
@@ -45,6 +46,7 @@ def load_state(payload: dict[str, Any]) -> SentinelState:
             repair_strikes=int(raw.get("repair_strikes", 0)),
             consecutive_tool_errors=int(raw.get("consecutive_tool_errors", 0)),
             unverified_code_edits=bool(raw.get("unverified_code_edits", False)),
+            edited_since_last_fail=bool(raw.get("edited_since_last_fail", False)),
             edited_code_files=[str(x) for x in (raw.get("edited_code_files") or []) if isinstance(x, str)],
             edited_domain_dirs=[str(x) for x in (raw.get("edited_domain_dirs") or []) if isinstance(x, str)],
         )

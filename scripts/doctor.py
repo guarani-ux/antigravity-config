@@ -219,6 +219,91 @@ def _check_python_scripts_and_imports(config_dir: Path, errors: list[str]) -> in
     return count
 
 
+def _check_script_reachability(config_dir: Path, errors: list[str]) -> list[str]:
+    """Verify every non-test Python script under scripts/ is reachable from hooks, CI, bootstrap, or imports."""
+    scripts_root = config_dir / "scripts"
+    if not scripts_root.is_dir():
+        return []
+
+    all_scripts: dict[str, Path] = {}
+    for py_file in sorted(scripts_root.rglob("*.py")):
+        rel_parts = py_file.relative_to(scripts_root).parts
+        if "__pycache__" in rel_parts or (rel_parts and rel_parts[0] == "tests"):
+            continue
+        all_scripts[py_file.relative_to(scripts_root).as_posix()] = py_file
+
+    seeds: set[str] = set()
+    for cli_seed in ("doctor.py", "eval_harness.py"):
+        if cli_seed in all_scripts:
+            seeds.add(cli_seed)
+    for manifest in (
+        config_dir / "hooks.json.portable",
+        config_dir / ".github" / "workflows" / "ci.yml",
+        config_dir / "bootstrap.sh",
+        config_dir / "bootstrap.ps1",
+    ):
+        if not manifest.is_file():
+            continue
+        raw = manifest.read_text(encoding="utf-8", errors="replace")
+        if manifest.suffix != ".json":
+            raw = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+        for m in SCRIPT_PATH_RE.finditer(raw):
+            rel = m.group(1).replace("\\", "/")
+            if rel in all_scripts:
+                seeds.add(rel)
+
+    def _resolve_import(curr_rel: str, module: str | None, level: int, names: list[str]) -> set[str]:
+        found: set[str] = set()
+        curr_dir = Path(curr_rel).parent
+        base_parts = list(curr_dir.parts) if level > 0 else []
+        if level > 1:
+            base_parts = base_parts[: max(0, len(base_parts) - (level - 1))]
+        mod_parts = [p for p in (module or "").split(".") if p]
+        candidates: list[list[str]] = []
+        if mod_parts:
+            candidates.append(base_parts + mod_parts)
+        for nm in names:
+            if nm != "*":
+                candidates.append(base_parts + mod_parts + [nm])
+        for parts in candidates:
+            if not parts:
+                continue
+            as_file = "/".join(parts) + ".py"
+            as_pkg = "/".join(parts) + "/__init__.py"
+            if as_file in all_scripts:
+                found.add(as_file)
+            if as_pkg in all_scripts:
+                found.add(as_pkg)
+        return found
+
+    visited: set[str] = set()
+    queue = sorted(seeds)
+    while queue:
+        rel = queue.pop(0)
+        if rel in visited or rel not in all_scripts:
+            continue
+        visited.add(rel)
+        try:
+            tree = ast.parse(all_scripts[rel].read_text(encoding="utf-8"), filename=rel)
+        except (SyntaxError, OSError, UnicodeError):
+            continue
+        for node in ast.walk(tree):
+            targets: set[str] = set()
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    targets |= _resolve_import(rel, alias.name, 0, [])
+            elif isinstance(node, ast.ImportFrom):
+                targets |= _resolve_import(rel, node.module, node.level, [a.name for a in node.names])
+            for t in sorted(targets):
+                if t not in visited:
+                    queue.append(t)
+
+    dead = sorted(set(all_scripts) - visited)
+    for rel in dead:
+        errors.append(f"Unreachable script (not wired to hooks, CI, bootstrap, or imports): scripts/{rel}")
+    return dead
+
+
 def _resolve_gemini_dir(config_dir: Path, gemini_dir: Path | None) -> Path:
     if gemini_dir is not None:
         return gemini_dir.expanduser().resolve()
@@ -274,10 +359,11 @@ def run_doctor(
         if not installed_gemini.is_file():
             errors.append(f"Installed GEMINI.md missing at {installed_gemini}")
         elif installed_gemini.read_text(encoding="utf-8") != global_src.read_text(encoding="utf-8"):
-            warnings.append(f"Installed GEMINI.md drifted from GEMINI.global.md; re-run bootstrap --force")
+            warnings.append("Installed GEMINI.md drifted from GEMINI.global.md; re-run bootstrap --force")
 
-    # 3. Python scripts syntax & core hook presence
+    # 3. Python scripts syntax, core hook presence & reachability
     py_count = _check_python_scripts_and_imports(config_dir, errors)
+    dead_scripts = _check_script_reachability(config_dir, errors)
 
     # 4. Skills hygiene & broken local references
     skills = _check_skills(config_dir, errors, warnings)
@@ -290,6 +376,7 @@ def run_doctor(
         "config_dir": str(config_dir),
         "python_version": sys.version.split()[0],
         "python_files_checked": py_count,
+        "unreachable_scripts": dead_scripts,
         "skills": skills,
         "telemetry": telemetry,
         "errors": errors,

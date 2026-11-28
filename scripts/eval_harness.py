@@ -275,7 +275,7 @@ def run_benchmark() -> dict[str, Any]:
             lambda r: r.get("injectSteps") == [],
         )
 
-        # 7. "log this error" does NOT trigger plainspoken Working_Context rule
+        # 7. "log this error" abstains from all router signals
         check_case(
             allows,
             "log_this_error_abstains",
@@ -285,7 +285,7 @@ def run_benchmark() -> dict[str, Any]:
             lambda r: r.get("injectSteps") == [],
         )
 
-        # 8. Corrupt operator-router-seen.json self-heals and routes waterwall
+        # 8. Corrupt operator-router-seen.json self-heals and routes potential-unleashed
         _, art_a8, _, _ = _new_case_env(tmp_root, "a8_corrupt", oriented=False, env=env)
         (art_a8 / "operator-router-seen.json").write_text("{corrupt", encoding="utf-8")
         check_case(
@@ -294,7 +294,7 @@ def run_benchmark() -> dict[str, Any]:
             ROUTER_CLI,
             "pre-invocation",
             {"conversationId": "b1", "artifactDirectoryPath": str(art_a8), "lastUserInput": "build a python validator for our workflow"},
-            lambda r: _has_router_signal(r, "waterwall"),
+            lambda r: _has_router_signal(r, "potential-unleashed"),
         )
 
         # Verify flight recorder recorded valid JSONL with zero leaked secret values

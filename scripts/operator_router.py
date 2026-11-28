@@ -39,51 +39,24 @@ SIGNAL_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "Actions & Waiting-On, Risks/Tension, 1-2 falsifiable assumptions, and typed handoffs below a divider.",
     ),
     (
-        "waterwall",
+        "potential_unleashed",
         re.compile(
-            r"\b(?:waterwall|crucible_gate|sentinel\.py|operator_router|hooks\.json|test_quality_gate|"
+            r"\b(?:potential[- ]?unleashed|crucible_gate|sentinel\.py|operator_router|hooks\.json|test_quality_gate|"
             r"cross-file contract|schema change|"
-            r"(?:build|refactor|ship|update|create|harden)\s+(?:a\s+|an\s+|the\s+|my\s+)?(?:\w+\s+){0,2}"
-            r"(?:skill|validator|harness|pipeline|engine|module|cli|hook|workflow))\b",
+            r"(?:build|refactor|ship|update|create|harden|audit|redesign|transform)\s+(?:a\s+|an\s+|the\s+|my\s+)?"
+            r"(?:[\w./-]+\s+){0,2}(?:[\w./-]+-)?(?:skill|validator|harness|pipeline|engine|module|cli|hook|workflow|system|script|config))\b",
             re.IGNORECASE,
         ),
-        "SIGNAL [waterwall]: Load waterwall. Build against messy reality, compress losslessly, run existing tests "
-        "after the final edit, and run 1 fresh read-only review pass on structural/interface/skill changes.",
+        "SIGNAL [potential-unleashed]: Load potential-unleashed. Own the outcome, reshape/cut before patching, "
+        "prove red-to-green through the real doorway (including the absent case), and blind-break structural changes.",
     ),
-    (
-        "plainspoken_partner",
-        re.compile(
-            r"(?:\b(?:stakeholder|trade-?off|should we ship|weigh(?:ing)? our options|"
-            r"how should we approach|working_context)\b|"
-            r"\b(?:pitch|draft)\s+(?:email|deck|memo|to\s+leadership)\b|"
-            r"\b(?:video|campaign|content|q[1-4])\s+strategy\b|"
-            r"(?:^|[.!?]\s+|\s)log this(?=$|[.!?,]\s*|\s*$))",
-            re.IGNORECASE,
-        ),
-        "SIGNAL [plainspoken-partner]: Load plainspoken-partner. Challenge weak premises cleanly (deliver + flag), "
-        "gate external mutations, and handle Working_Context.md via gdrive only when prior context is needed.",
-    ),
-    (
-        "diagnosing_bugs",
-        re.compile(
-            r"\b(?:debug(?:ging)?|diagnos(?:e|ing)|failing tests?|flaky|stack trace|traceback|"
-            r"throwing\s+(?:an?\s+)?(?:error|exception|typeerror|valueerror|keyerror|runtimeerror|traceback)|"
-            r"(?:fix|investigate|caused|introduced|hit|track\s+down|debug)\s+(?:a\s+|this\s+|the\s+)?regression)\b",
-            re.IGNORECASE,
-        ),
-        "SIGNAL [diagnosing-bugs]: Reproduce with a failing command BEFORE forming hypotheses or editing code.",
-    ),
-    (
-        "natural_intent",
-        re.compile(
-            r"\b(?:i want (?:a |the )?(?:system|machine|tool|workflow|process|app)|"
-            r"make it so|come as i am|without .* getting in the way)\b",
-            re.IGNORECASE,
-        ),
-        "SIGNAL [natural-intent]: Translate the user's plain-English goal into (1) exact target files, "
-        "(2) blast-radius callers via scripts/code_graph.py if editing code, (3) deterministic invariants, "
-        "and (4) 1-2 messy real-world test cases BEFORE editing. Never require CS jargon from the user.",
-    ),
+)
+
+BUG_SIGNAL_RE = re.compile(
+    r"\b(?:debug(?:ging)?|diagnos(?:e|ing)|failing tests?|flaky|stack trace|traceback|"
+    r"throwing\s+(?:an?\s+)?(?:error|exception|typeerror|valueerror|keyerror|runtimeerror|traceback)|"
+    r"(?:fix|investigate|caused|introduced|hit|track\s+down|debug)\s+(?:a\s+|this\s+|the\s+)?regression)\b",
+    re.IGNORECASE,
 )
 
 SPEC_DOC_RE = re.compile(
@@ -191,14 +164,21 @@ def detect_prompt_signals(user_text: str) -> list[str]:
     if not user_text:
         return []
     messages: list[str] = []
-    skip_diagnosing = (
-        len(user_text) > 1500 or bool(SPEC_DOC_RE.search(user_text))
-    ) and not bool(TRACE_RE.search(user_text))
+    matched_pu = False
+    pu_instruction = ""
     for signal_id, pattern, instruction in SIGNAL_RULES:
-        if signal_id == "diagnosing_bugs" and skip_diagnosing:
-            continue
+        if signal_id == "potential_unleashed":
+            pu_instruction = instruction
         if pattern.search(user_text):
             messages.append(instruction)
+            if signal_id == "potential_unleashed":
+                matched_pu = True
+
+    skip_bug_signal = (
+        len(user_text) > 1500 or bool(SPEC_DOC_RE.search(user_text))
+    ) and not bool(TRACE_RE.search(user_text))
+    if not matched_pu and not skip_bug_signal and BUG_SIGNAL_RE.search(user_text):
+        messages.append(pu_instruction)
     return messages
 
 
@@ -209,7 +189,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             "systemMessage": {
                 "systemMessage": (
                     "Global constitution active (5 Sentinel/Router hooks live; "
-                    "plainspoken-partner for collaboration, waterwall for builds, meeting-brief for transcripts)."
+                    "potential-unleashed for engineering/debugging, meeting-brief for transcripts)."
                 )
             }
         }
@@ -233,17 +213,6 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any]:
             )
         steps.append({"systemMessage": {"systemMessage": msg}})
 
-    try:
-        import failure_ledger
-
-        ws = payload.get("workspacePaths") or []
-        scope = Path(str(ws[0])).name if ws else None
-        lessons = failure_ledger.load_recent_lessons(scope=scope, limit=3)
-        if lessons:
-            summary = " | ".join(f"{it['pattern']} -> {it.get('fix') or it['root_cause']}" for it in lessons)
-            steps.append({"systemMessage": {"systemMessage": f"FAILURE LEDGER (avoid repeating): {summary}"}})
-    except Exception:
-        pass
     return {"injectSteps": steps}
 
 

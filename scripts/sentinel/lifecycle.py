@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,12 @@ WRITE_TOOLS = ("write_file", "write_to_file")
 EDIT_TOOLS = ("edit_file", "replace_file_content", "multi_replace_file_content")
 MUTATE_FILE_TOOLS = WRITE_TOOLS + EDIT_TOOLS
 SHELL_TOOLS = ("run_command", "command")
+VACUOUS_TEST_OUTPUT_RE = re.compile(
+    r"(?i)(?:\bran\s+0\s+tests\b|\bcollected\s+0\s+items\b|\bno\s+tests\s+ran\b|\b0\s+passed\b)"
+)
+NONZERO_TEST_OUTPUT_RE = re.compile(
+    r"(?i)(?:\b[1-9]\d*\s+(?:passed|passing)\b|\bran\s+[1-9]\d*\s+tests?\b)"
+)
 
 
 def _extract_path_arg(args: dict[str, Any]) -> Any:
@@ -55,6 +62,24 @@ def _is_tool_failed(payload: dict[str, Any]) -> bool:
             if isinstance(val, int) and not isinstance(val, bool) and val != 0:
                 return True
     return False
+
+
+def _is_vacuous_test_output(payload: dict[str, Any]) -> bool:
+    """Return True if captured command output explicitly shows 0 tests executed (and no non-zero suite passed)."""
+    chunks: list[str] = []
+    for container in (payload, payload.get("toolResult"), payload.get("result")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("stdout", "stderr", "output", "text"):
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                chunks.append(val)
+    if not chunks:
+        return False
+    combined = "\n".join(chunks)
+    if NONZERO_TEST_OUTPUT_RE.search(combined):
+        return False
+    return bool(VACUOUS_TEST_OUTPUT_RE.search(combined))
 
 
 def pre(payload: dict[str, Any]) -> dict[str, str]:
@@ -199,6 +224,8 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
                     if full not in st.edited_code_files:
                         st.edited_code_files.append(full)
                     st.unverified_code_edits = True
+                    if not is_test_file(full):
+                        st.edited_since_last_fail = True
                 dom = domain_bucket(rel)
                 if dom and dom not in st.edited_domain_dirs:
                     st.edited_domain_dirs.append(dom)
@@ -208,28 +235,13 @@ def post(payload: dict[str, Any]) -> dict[str, Any]:
         cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
         if is_meaningful_verification_command(cmd):
             if failed:
-                if st.unverified_code_edits:
+                if st.unverified_code_edits and st.edited_since_last_fail:
                     st.repair_strikes += 1
-                    if st.repair_strikes == 3:
-                        try:
-                            scripts_dir = str(Path(__file__).resolve().parents[1])
-                            if scripts_dir not in sys.path:
-                                sys.path.insert(0, scripts_dir)
-                            import failure_ledger
-
-                            repo_scope = os.path.basename(effective_roots(payload.get("workspacePaths") or [])[0])
-                            failure_ledger.record_failure_lesson(
-                                pattern=f"3-Strike lock on {os.path.basename(st.edited_code_files[-1]) if st.edited_code_files else 'edit'}",
-                                root_cause=f"Verification failed 3x running: {cmd[:120]}",
-                                fix="Inspect callers/tests and root cause before patching again.",
-                                scope=repo_scope,
-                                source="sentinel",
-                            )
-                        except Exception:
-                            pass
-            else:
+                    st.edited_since_last_fail = False
+            elif not _is_vacuous_test_output(payload):
                 st.repair_strikes = 0
                 st.unverified_code_edits = False
+                st.edited_since_last_fail = False
                 st.edited_code_files = []
                 if "crucible_gate.py" in cmd.lower() or "verify_all.ps1" in cmd.lower():
                     st.edited_domain_dirs = []

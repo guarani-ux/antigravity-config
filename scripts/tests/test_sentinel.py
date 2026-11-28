@@ -100,25 +100,45 @@ class TestSentinelEnforcement(unittest.TestCase):
             base = {"workspacePaths": [str(root)], "artifactDirectoryPath": str(art)}
             sentinel.post({**base, "toolCall": {"name": "read_file", "args": {"Path": str(target)}}})
 
-            edit_payload = {
-                **base,
-                "toolCall": {"name": "write_file", "args": {"Path": str(target), "Content": "val = 1\n"}},
-            }
-            self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
-            sentinel.post(edit_payload)
-
-            # Non-zero exitCode without top-level error field must count as a failed verification
             fail_verify = {
                 **base,
                 "toolResult": {"exitCode": 1},
                 "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -v"}},
             }
+            edit_payload = {
+                **base,
+                "toolCall": {"name": "write_file", "args": {"Path": str(target), "Content": "val = 1\n"}},
+            }
+
+            # Red discovery test BEFORE editing must NOT add a strike
             sentinel.post(fail_verify)
-            self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
             sentinel.post(fail_verify)
             self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
 
-            # Strike 3 locks further edits
+            # Writing a new red TDD test file and watching it fail must NOT add a strike
+            tdd_test = root / "tests" / "test_calc.py"
+            tdd_payload = {
+                **base,
+                "toolCall": {"name": "write_file", "args": {"Path": str(tdd_test), "Content": "def test_red():\n    assert False\n"}},
+            }
+            sentinel.post(tdd_payload)
+            sentinel.post(fail_verify)
+            self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
+
+            # Strike 1: prod edit -> fail; extra diagnostic fails without editing must NOT add strikes
+            sentinel.post(edit_payload)
+            sentinel.post(fail_verify)
+            sentinel.post(fail_verify)
+            sentinel.post(fail_verify)
+            self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
+
+            # Strike 2: edit -> fail
+            sentinel.post(edit_payload)
+            sentinel.post(fail_verify)
+            self.assertEqual(sentinel.pre(edit_payload)["decision"], "allow")
+
+            # Strike 3: edit -> fail locks further edits
+            sentinel.post(edit_payload)
             sentinel.post(fail_verify)
             locked = sentinel.pre(edit_payload)
             self.assertEqual(locked["decision"], "deny")
@@ -164,10 +184,39 @@ class TestSentinelEnforcement(unittest.TestCase):
             still_blocked = sentinel.stop(idle_stop)
             self.assertEqual(still_blocked["decision"], "continue")
 
+            # Vacuous 0-test runs ("Ran 0 tests", "collected 0 items", "0 passed") must NOT clear Verify-Before-Stop
+            for vacuous_out in (
+                "Ran 0 tests in 0.000s\n\nOK\n",
+                "collected 0 items\nno tests ran in 0.01s\n",
+                "test result: ok. 0 passed; 0 failed\n",
+            ):
+                sentinel.post(
+                    {
+                        **base,
+                        "toolResult": {"exitCode": 0, "stdout": vacuous_out},
+                        "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -v"}},
+                    }
+                )
+                self.assertEqual(sentinel.stop(idle_stop)["decision"], "continue", vacuous_out)
+
             cont_stop = dict(idle_stop, continuationActive=True)
             self.assertEqual(sentinel.stop(cont_stop)["decision"], "allow")
 
-            sentinel.post({**base, "toolCall": {"name": "run_command", "args": {"CommandLine": "pytest -v"}}})
+            # Multi-suite cargo test with 12 passed + 0 doc-tests MUST clear Verify-Before-Stop
+            cargo_out = (
+                "running 12 tests\n"
+                "test result: ok. 12 passed; 0 failed\n\n"
+                "Doc-tests app\n"
+                "running 0 tests\n"
+                "test result: ok. 0 passed; 0 failed\n"
+            )
+            sentinel.post(
+                {
+                    **base,
+                    "toolResult": {"exitCode": 0, "stdout": cargo_out},
+                    "toolCall": {"name": "run_command", "args": {"CommandLine": "cargo test"}},
+                }
+            )
             self.assertEqual(sentinel.stop(idle_stop)["decision"], "allow")
 
     def test_single_pass_ast_edit_file_conftest_and_jetski_brain(self) -> None:
